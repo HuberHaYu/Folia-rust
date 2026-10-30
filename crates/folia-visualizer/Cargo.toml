@@ -1,0 +1,15 @@
+[package]
+name = "folia-visualizer"
+description = "Lyric animation styles for Folia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+folia-core.workspace = true
+folia-lyrics.workspace = true
+iced.workspace = true
+
+[lints]
+workspace = true

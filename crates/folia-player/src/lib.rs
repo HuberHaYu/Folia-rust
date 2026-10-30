@@ -3,12 +3,10 @@
 mod convert;
 mod decoder;
 mod output;
-mod queue;
 mod shared;
 mod source;
 
 pub use convert::map_channels;
-pub use queue::{Queue, Repeat};
 pub use shared::PlayerState;
 
 use std::path::{Path, PathBuf};
@@ -75,6 +73,9 @@ impl Player {
 
     /// Starts playing `path` from the beginning.
     pub fn load(&self, path: &Path) {
+        // Mark the new track as playing now, so a status read before the decoder starts never sees the old end.
+        self.shared.decoder_done.store(false, std::sync::atomic::Ordering::Release);
+        self.shared.set_state(PlayerState::Playing);
         self.run_stream(true);
         self.send(Command::Load(path.to_owned()));
     }

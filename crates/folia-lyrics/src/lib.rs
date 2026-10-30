@@ -2,10 +2,13 @@
 
 mod align;
 mod clock;
+mod hints;
 mod lrc;
 mod tagged;
 mod vtt;
 mod words;
+
+pub use hints::{RenderHints, Reveal, Transition, active_line};
 
 use folia_core::Lyrics;
 

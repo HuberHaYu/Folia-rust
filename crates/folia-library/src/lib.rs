@@ -4,6 +4,7 @@ mod lyrics;
 mod tags;
 
 pub use lyrics::{decode_text, lyrics_for};
+pub use tags::read as read_track;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

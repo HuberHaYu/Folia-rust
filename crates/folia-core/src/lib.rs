@@ -2,8 +2,12 @@
 
 mod language;
 mod lyrics;
+mod queue;
+mod theme;
 mod track;
 
 pub use language::{Language, LanguagePreference};
 pub use lyrics::{INTERLUDE_TEXT, Line, Lyrics, Word};
+pub use queue::{Queue, Repeat};
+pub use theme::{AnimationIntensity, Rgb, Theme};
 pub use track::Track;

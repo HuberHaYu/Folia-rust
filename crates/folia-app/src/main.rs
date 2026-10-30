@@ -2,8 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use folia_i18n::I18n;
-use folia_store::{AppDirs, GeneralSettings, Store};
-use folia_ui::Shell;
+use folia_store::{AppDirs, AppearanceSettings, GeneralSettings, PlaybackSettings, Store};
+use folia_ui::{Init, Shell};
 use tracing_subscriber::EnvFilter;
 
 // Debug builds keep their settings apart so development never touches a real install.
@@ -17,21 +17,26 @@ fn main() -> anyhow::Result<()> {
 
     let dirs = AppDirs::new(APP_DIR)?;
     let store = Store::at(&dirs.config);
-    let settings = store.load::<GeneralSettings>().unwrap_or_else(|err| {
-        tracing::warn!(error = &err as &dyn std::error::Error, "general settings unreadable, using defaults");
-        GeneralSettings::default()
-    });
+    let general: GeneralSettings = store.load_or_default();
     let system_locale = sys_locale::get_locale();
-    let i18n = I18n::new(settings.language.resolve(system_locale.as_deref()))?;
+    let i18n = I18n::new(general.language.resolve(system_locale.as_deref()))?;
     tracing::info!(config = %store.dir().display(), language = i18n.language().code(), "starting");
 
-    iced::application(
-        move || Shell::new(store.clone(), settings.clone(), i18n.clone(), system_locale.clone()),
-        Shell::update,
-        Shell::view,
-    )
-    .title(Shell::title)
-    .window_size(WINDOW_SIZE)
-    .run()?;
+    let init = Init {
+        appearance: store.load_or_default::<AppearanceSettings>(),
+        playback: store.load_or_default::<PlaybackSettings>(),
+        library_db: dirs.data.join("library.db"),
+        open_files: std::env::args_os().skip(1).map(std::path::PathBuf::from).collect(),
+        store,
+        general,
+        i18n,
+        system_locale,
+    };
+    iced::application(move || Shell::new(init.clone()), Shell::update, Shell::view)
+        .title(Shell::title)
+        .theme(Shell::theme)
+        .subscription(Shell::subscription)
+        .window_size(WINDOW_SIZE)
+        .run()?;
     Ok(())
 }

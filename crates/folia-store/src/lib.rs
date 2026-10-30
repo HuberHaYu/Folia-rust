@@ -1,8 +1,12 @@
 // Settings persistence: each domain is one versioned TOML file in the config directory.
 
+mod appearance;
 mod general;
+mod playback;
 
+pub use appearance::{AppearanceSettings, FrameRate, ThemeMode};
 pub use general::GeneralSettings;
+pub use playback::PlaybackSettings;
 
 use std::fs;
 use std::io;
@@ -78,6 +82,18 @@ impl Store {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Reads a domain; an unreadable file is logged and replaced by the defaults.
+    pub fn load_or_default<T: Domain>(&self) -> T {
+        self.load().unwrap_or_else(|err| {
+            tracing::warn!(
+                file = T::FILE,
+                error = &err as &dyn std::error::Error,
+                "settings unreadable, using defaults"
+            );
+            T::default()
+        })
     }
 
     /// Reads a domain, returning its default when the file does not exist yet.

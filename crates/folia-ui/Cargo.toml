@@ -9,8 +9,13 @@ license.workspace = true
 [dependencies]
 folia-core.workspace = true
 folia-i18n.workspace = true
+folia-library.workspace = true
+folia-player.workspace = true
 folia-store.workspace = true
+folia-visualizer.workspace = true
 iced.workspace = true
+lucide-static-svg.workspace = true
+rfd.workspace = true
 tracing.workspace = true
 
 [lints]
