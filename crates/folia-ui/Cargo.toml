@@ -1,0 +1,17 @@
+[package]
+name = "folia-ui"
+description = "Pages, widgets and app state for Folia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+folia-core.workspace = true
+folia-i18n.workspace = true
+folia-store.workspace = true
+iced.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

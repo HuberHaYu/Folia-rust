@@ -1,0 +1,11 @@
+[app]
+name = "Folia"
+
+[options]
+appLanguage = "Ngôn ngữ giao diện"
+appLanguageSystem = "Theo hệ thống"
+appLanguageZhCN = "Tiếng Trung giản thể"
+appLanguageZhTW = "Tiếng Trung Phồn thể"
+appLanguageEnUS = "Tiếng Anh"
+appLanguageInID = "Tiếng Indonesia"
+appLanguageViVN = "Tiếng Việt"

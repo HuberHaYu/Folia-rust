@@ -1,0 +1,11 @@
+[app]
+name = "Folia"
+
+[options]
+appLanguage = "Bahasa antarmuka"
+appLanguageSystem = "Ikuti sistem"
+appLanguageZhCN = "Tionghoa Sederhana"
+appLanguageZhTW = "Tionghoa Tradisional"
+appLanguageEnUS = "Inggris"
+appLanguageInID = "Indonesia"
+appLanguageViVN = "Bahasa Vietnam"

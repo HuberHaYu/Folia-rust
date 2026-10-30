@@ -1,0 +1,11 @@
+[app]
+name = "Folia"
+
+[options]
+appLanguage = "Interface language"
+appLanguageSystem = "Follow system"
+appLanguageZhCN = "Simplified Chinese"
+appLanguageZhTW = "Traditional Chinese"
+appLanguageEnUS = "English"
+appLanguageInID = "Indonesian"
+appLanguageViVN = "Vietnamese"

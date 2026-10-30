@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["test"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Techuouo520/Folia-rust"
+
+[workspace.dependencies]
+folia-core = { path = "crates/folia-core" }
+folia-store = { path = "crates/folia-store" }
+folia-i18n = { path = "crates/folia-i18n" }
+folia-ui = { path = "crates/folia-ui" }
+
+anyhow = "1.0.104"
+directories = "6.0.0"
+iced = "0.14.0"
+serde = { version = "1.0.229", features = ["derive"] }
+sys-locale = "0.3.2"
+thiserror = "2.0.21"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zhconv = "0.4.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

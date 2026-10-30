@@ -1,0 +1,18 @@
+[package]
+name = "folia-i18n"
+description = "Interface text for Folia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+folia-core.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[build-dependencies]
+zhconv.workspace = true
+
+[lints]
+workspace = true
