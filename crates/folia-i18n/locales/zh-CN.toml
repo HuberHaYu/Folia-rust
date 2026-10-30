@@ -26,6 +26,7 @@ unknownArtist = "未知歌手"
 unknownAlbum = "未知专辑"
 
 [ui]
+searching = "搜索中..."
 previousTrack = "上一首"
 nextTrack = "下一首"
 volume = "音量"
@@ -42,3 +43,14 @@ importFolder = "导入文件夹"
 importing = "导入中..."
 noLocalMusic = "暂无本地音乐"
 reload = "重新加载"
+
+[search]
+placeholder = "搜索歌曲..."
+error = "搜索失败，请重试。"
+
+[libraryBravaisHome]
+search = "搜索"
+searchSubmit = "搜索"
+
+[home]
+loading = "加载中..."

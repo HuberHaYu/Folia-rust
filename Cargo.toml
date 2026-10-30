@@ -17,6 +17,7 @@ folia-i18n = { path = "crates/folia-i18n" }
 folia-ui = { path = "crates/folia-ui" }
 folia-lyrics = { path = "crates/folia-lyrics" }
 folia-library = { path = "crates/folia-library" }
+folia-omni = { path = "crates/folia-omni" }
 folia-player = { path = "crates/folia-player" }
 folia-visualizer = { path = "crates/folia-visualizer" }
 
@@ -30,6 +31,7 @@ lofty = "0.25.5"
 lucide-static-svg = "1.65.0"
 quick-xml = "0.42.0"
 rayon = "1.12.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "form"] }
 rfd = "0.17.2"
 rtrb = "0.4.1"
 rubato = "5.0.1"

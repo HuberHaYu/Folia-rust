@@ -26,6 +26,7 @@ unknownArtist = "Nghệ sĩ không rõ"
 unknownAlbum = "Album không rõ"
 
 [ui]
+searching = "Đang tìm kiếm..."
 previousTrack = "Bài trước"
 nextTrack = "Bài tiếp theo"
 volume = "Âm lượng"
@@ -42,3 +43,14 @@ importFolder = "Nhập thư mục"
 importing = "Đang nhập..."
 noLocalMusic = "Chưa nhập nhạc nội bộ"
 reload = "Tải lại"
+
+[search]
+placeholder = "Tìm bài hát..."
+error = "Tìm kiếm thất bại. Thử lại sau."
+
+[libraryBravaisHome]
+search = "Tìm kiếm"
+searchSubmit = "Tìm kiếm"
+
+[home]
+loading = "Đang tải..."

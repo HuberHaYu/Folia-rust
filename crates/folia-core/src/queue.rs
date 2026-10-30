@@ -43,6 +43,10 @@ impl<T> Queue<T> {
         self.items.get(self.current?)
     }
 
+    pub fn current_mut(&mut self) -> Option<&mut T> {
+        self.items.get_mut(self.current?)
+    }
+
     /// Moves to the next item. `finished` is true when the current item played to its end,
     /// in which case repeat-one replays it.
     pub fn advance(&mut self, finished: bool) -> Option<&T> {

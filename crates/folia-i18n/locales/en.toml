@@ -26,6 +26,7 @@ unknownArtist = "Unknown Artist"
 unknownAlbum = "Unknown Album"
 
 [ui]
+searching = "Searching..."
 previousTrack = "Previous track"
 nextTrack = "Next track"
 volume = "Volume"
@@ -42,3 +43,14 @@ importFolder = "Import Folder"
 importing = "Importing..."
 noLocalMusic = "No local music imported yet"
 reload = "Reload"
+
+[search]
+placeholder = "Search songs..."
+error = "Search failed. Please try again."
+
+[libraryBravaisHome]
+search = "Search"
+searchSubmit = "Search"
+
+[home]
+loading = "Loading..."

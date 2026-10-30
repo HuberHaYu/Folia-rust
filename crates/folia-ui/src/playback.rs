@@ -1,19 +1,25 @@
 // Playback controller: owns the player and the queue, follows track ends and loads lyrics.
 
+use std::path::PathBuf;
+
 use folia_core::{Lyrics, Queue, Repeat, Track};
+use folia_omni::Omni;
 use folia_player::{Player, PlayerState, Status};
 use folia_store::{PlaybackSettings, Store};
 use iced::Task;
 
-use crate::background::{blocking, save};
+use crate::background::{blocking, error_chain, save};
 
 pub struct Playback {
     player: Option<Player>,
+    omni: Option<Omni>,
     pub queue: Queue<Track>,
     pub lyrics: Option<Lyrics>,
     pub status: Status,
     pub settings: PlaybackSettings,
     seeking: Option<f64>,
+    /// Tracks that failed one after another; playback stops once the whole queue has failed.
+    failures: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -28,10 +34,11 @@ pub enum Message {
     CycleRepeat,
     Tick,
     LyricsLoaded(i64, Option<Lyrics>),
+    AudioReady(i64, Result<PathBuf, String>),
 }
 
 impl Playback {
-    pub fn new(settings: PlaybackSettings) -> Self {
+    pub fn new(settings: PlaybackSettings, omni: Option<Omni>) -> Self {
         let player = match Player::new() {
             Ok(player) => {
                 player.set_volume(settings.volume);
@@ -45,7 +52,7 @@ impl Playback {
         let mut queue = Queue::default();
         queue.repeat = settings.repeat;
         let status = Status { state: PlayerState::Idle, position: 0.0, duration: 0.0 };
-        Self { player, queue, lyrics: None, status, settings, seeking: None }
+        Self { player, omni, queue, lyrics: None, status, settings, seeking: None, failures: 0 }
     }
 
     pub fn current(&self) -> Option<&Track> {
@@ -121,6 +128,23 @@ impl Playback {
                 }
                 Task::none()
             }
+            Message::AudioReady(id, result) => {
+                let Some(track) = self.queue.current_mut().filter(|track| track.id == id) else { return Task::none() };
+                match result {
+                    Ok(path) => {
+                        self.failures = 0;
+                        track.path = path;
+                        let path = track.path.clone();
+                        self.with_player(|player| player.load(&path));
+                        self.refresh();
+                        Task::none()
+                    }
+                    Err(err) => {
+                        tracing::warn!(track = %track.display_name(), error = %err, "online track unavailable");
+                        self.fail()
+                    }
+                }
+            }
         }
     }
 
@@ -128,7 +152,7 @@ impl Playback {
         self.refresh();
         match self.status.state {
             PlayerState::Ended => self.advance(true),
-            PlayerState::Failed => self.advance(false),
+            PlayerState::Failed => self.fail(),
             _ => Task::none(),
         }
     }
@@ -145,6 +169,17 @@ impl Playback {
         if self.queue.back().is_some() { self.start_current() } else { Task::none() }
     }
 
+    fn fail(&mut self) -> Task<Message> {
+        self.failures += 1;
+        if self.failures >= self.queue.items().len() {
+            self.failures = 0;
+            self.with_player(Player::stop);
+            self.refresh();
+            return Task::none();
+        }
+        self.advance(false)
+    }
+
     fn advance(&mut self, finished: bool) -> Task<Message> {
         if self.queue.advance(finished).is_some() {
             return self.start_current();
@@ -154,16 +189,37 @@ impl Playback {
         Task::none()
     }
 
+    /// Starts the current track: local files play at once, online tracks are downloaded first.
     fn start_current(&mut self) -> Task<Message> {
         let Some(track) = self.queue.current().cloned() else { return Task::none() };
         self.lyrics = None;
         self.seeking = None;
-        self.with_player(|player| player.load(&track.path));
-        self.refresh();
         tracing::info!(track = %track.display_name(), "playing");
-        Task::perform(blocking(move || folia_library::lyrics_for(&track.path)), move |lyrics| {
-            Message::LyricsLoaded(track.id, lyrics.flatten())
-        })
+        let id = track.id;
+        let (Some(online), Some(omni)) = (track.online.clone(), self.omni.clone()) else {
+            self.with_player(|player| player.load(&track.path));
+            self.refresh();
+            return Task::perform(blocking(move || folia_library::lyrics_for(&track.path)), move |lyrics| {
+                Message::LyricsLoaded(id, lyrics.flatten())
+            });
+        };
+
+        self.with_player(Player::stop);
+        self.refresh();
+        let (lyrics_omni, lyrics_id) = (omni.clone(), online.clone());
+        let lyrics = Task::perform(async move { lyrics_omni.lyrics(&lyrics_id).await }, move |result| {
+            Message::LyricsLoaded(
+                id,
+                result.unwrap_or_else(|err| {
+                    tracing::warn!(error = &err as &dyn std::error::Error, "online lyrics unavailable");
+                    None
+                }),
+            )
+        });
+        let audio = Task::perform(async move { omni.fetch_audio(&online).await }, move |result| {
+            Message::AudioReady(id, result.map_err(|err| error_chain(&err)))
+        });
+        Task::batch([audio, lyrics])
     }
 
     fn refresh(&mut self) {

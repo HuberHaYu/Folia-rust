@@ -194,6 +194,7 @@ impl Library {
                 track_no: row.get(6)?,
                 disc_no: row.get(7)?,
                 duration: row.get(8)?,
+                online: None,
             })
         })?;
         Ok(tracks.collect::<Result<_, _>>()?)

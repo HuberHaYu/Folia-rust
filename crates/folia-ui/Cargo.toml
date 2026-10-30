@@ -10,6 +10,7 @@ license.workspace = true
 folia-core.workspace = true
 folia-i18n.workspace = true
 folia-library.workspace = true
+folia-omni.workspace = true
 folia-player.workspace = true
 folia-store.workspace = true
 folia-visualizer.workspace = true

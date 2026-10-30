@@ -26,6 +26,7 @@ unknownArtist = "Artis Tidak Dikenal"
 unknownAlbum = "Album Tidak Dikenal"
 
 [ui]
+searching = "Mencari..."
 previousTrack = "Lagu sebelumnya"
 nextTrack = "Lagu berikutnya"
 volume = "Volume"
@@ -42,3 +43,14 @@ importFolder = "Impor Folder"
 importing = "Mengimpor..."
 noLocalMusic = "Belum ada musik lokal yang diimpor"
 reload = "Muat Ulang"
+
+[search]
+placeholder = "Cari lagu..."
+error = "Pencarian gagal. Silakan coba lagi."
+
+[libraryBravaisHome]
+search = "Cari"
+searchSubmit = "Cari"
+
+[home]
+loading = "Memuat..."

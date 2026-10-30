@@ -10,4 +10,4 @@ pub use language::{Language, LanguagePreference};
 pub use lyrics::{INTERLUDE_TEXT, Line, Lyrics, Word};
 pub use queue::{Queue, Repeat};
 pub use theme::{AnimationIntensity, Rgb, Theme};
-pub use track::Track;
+pub use track::{OnlineId, Track};

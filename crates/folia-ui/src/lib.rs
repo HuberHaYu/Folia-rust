@@ -6,7 +6,9 @@ mod library;
 mod now_playing;
 mod playback;
 mod player_bar;
+mod search;
 mod settings;
+mod track_list;
 
 pub use background::{error_chain, format_time};
 
@@ -14,6 +16,7 @@ use std::path::PathBuf;
 
 use folia_core::{Language, LanguagePreference, Lyrics, Theme, Track};
 use folia_i18n::I18n;
+use folia_omni::Omni;
 use folia_store::{AppearanceSettings, FrameRate, GeneralSettings, PlaybackSettings, Store, ThemeMode};
 use folia_visualizer::{Scene, Style};
 use iced::widget::{button, column, container, row, rule, space};
@@ -23,6 +26,7 @@ use lucide_static_svg::Icon;
 use crate::background::save;
 use crate::library::LibraryPage;
 use crate::playback::Playback;
+use crate::search::SearchPage;
 
 /// Everything the app reads before the window opens.
 #[derive(Clone)]
@@ -34,6 +38,8 @@ pub struct Init {
     pub i18n: I18n,
     pub system_locale: Option<String>,
     pub library_db: PathBuf,
+    /// Where downloaded online audio is cached.
+    pub cache_dir: PathBuf,
     /// Audio files given on the command line, played as a queue once the window opens.
     pub open_files: Vec<PathBuf>,
 }
@@ -41,6 +47,7 @@ pub struct Init {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Library,
+    Search,
     NowPlaying,
     Settings,
 }
@@ -52,6 +59,7 @@ pub enum Message {
     Theme(ThemeMode),
     FrameRate(FrameRate),
     Library(library::Message),
+    Search(search::Message),
     Playback(playback::Message),
     OpenFiles(Vec<Track>),
 }
@@ -66,6 +74,8 @@ pub struct Shell {
     iced_theme: iced::Theme,
     page: Page,
     library: LibraryPage,
+    search: SearchPage,
+    omni: Option<Omni>,
     playback: Playback,
     empty_lyrics: Lyrics,
 }
@@ -74,6 +84,9 @@ impl Shell {
     pub fn new(init: Init) -> (Self, Task<Message>) {
         let (library, load) = LibraryPage::new(init.library_db);
         let theme = init.appearance.theme.theme();
+        let omni = Omni::new(init.cache_dir)
+            .inspect_err(|err| tracing::error!(error = err as &dyn std::error::Error, "online music unavailable"))
+            .ok();
         let shell = Self {
             store: init.store,
             general: init.general,
@@ -84,7 +97,9 @@ impl Shell {
             system_locale: init.system_locale,
             page: Page::Library,
             library,
-            playback: Playback::new(init.playback),
+            search: SearchPage::default(),
+            playback: Playback::new(init.playback, omni.clone()),
+            omni,
             empty_lyrics: Lyrics::default(),
         };
         let open = if init.open_files.is_empty() { Task::none() } else { open_files(init.open_files) };
@@ -131,6 +146,18 @@ impl Shell {
                     None => task,
                 }
             }
+            Message::Search(message) => {
+                let (task, play) = self.search.update(message, self.omni.as_ref());
+                let task = task.map(Message::Search);
+                match play {
+                    Some(index) => {
+                        self.page = Page::NowPlaying;
+                        let start = self.playback.play(self.search.results.clone(), index).map(Message::Playback);
+                        Task::batch([task, start])
+                    }
+                    None => task,
+                }
+            }
             Message::Playback(message) => self.playback.update(message, &self.store).map(Message::Playback),
             Message::OpenFiles(tracks) if !tracks.is_empty() => {
                 self.page = Page::NowPlaying;
@@ -147,6 +174,10 @@ impl Shell {
             Page::Library => {
                 let playing = self.playback.current().map(|track| track.id);
                 self.library.view(&self.i18n, text_color, muted, playing).map(Message::Library)
+            }
+            Page::Search => {
+                let playing = self.playback.current().map(|track| track.id);
+                self.search.view(&self.i18n, muted, playing).map(Message::Search)
             }
             Page::NowPlaying => {
                 let scene = Scene {
@@ -191,6 +222,7 @@ impl Shell {
         };
         row![
             tab(Page::Library, Icon::ListMusic, "localMusic.allSongs"),
+            tab(Page::Search, Icon::Search, "libraryBravaisHome.search"),
             tab(Page::NowPlaying, Icon::AudioLines, "ui.visualizer"),
             space().width(Length::Fill),
             tab(Page::Settings, Icon::Settings, "ui.options"),

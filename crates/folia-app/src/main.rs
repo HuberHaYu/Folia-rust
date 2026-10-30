@@ -26,6 +26,7 @@ fn main() -> anyhow::Result<()> {
         appearance: store.load_or_default::<AppearanceSettings>(),
         playback: store.load_or_default::<PlaybackSettings>(),
         library_db: dirs.data.join("library.db"),
+        cache_dir: dirs.cache.clone(),
         open_files: std::env::args_os().skip(1).map(std::path::PathBuf::from).collect(),
         store,
         general,
