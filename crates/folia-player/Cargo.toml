@@ -1,0 +1,19 @@
+[package]
+name = "folia-player"
+description = "Audio playback engine for Folia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cpal.workspace = true
+rtrb.workspace = true
+rubato.workspace = true
+serde.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
