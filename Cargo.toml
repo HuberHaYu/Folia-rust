@@ -15,11 +15,16 @@ folia-core = { path = "crates/folia-core" }
 folia-store = { path = "crates/folia-store" }
 folia-i18n = { path = "crates/folia-i18n" }
 folia-ui = { path = "crates/folia-ui" }
+folia-lyrics = { path = "crates/folia-lyrics" }
+folia-library = { path = "crates/folia-library" }
+folia-player = { path = "crates/folia-player" }
 
 anyhow = "1.0.104"
+base64 = "0.23.1"
 directories = "6.0.0"
 iced = "0.14.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 sys-locale = "0.3.2"
 thiserror = "2.0.21"
 toml = "1.1.8"
