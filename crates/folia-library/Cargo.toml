@@ -1,0 +1,21 @@
+[package]
+name = "folia-library"
+description = "Local music library: folder scan, tags, SQLite index and lyric lookup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+folia-core.workspace = true
+folia-lyrics.workspace = true
+encoding_rs.workspace = true
+lofty.workspace = true
+rayon.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+
+[lints]
+workspace = true

@@ -16,8 +16,8 @@ const VERSION_KEY: &str = "schema_version";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("no config directory is available on this system")]
-    NoConfigDir,
+    #[error("no app directories are available on this system")]
+    NoAppDirs,
     #[error("cannot access {path}")]
     Io {
         path: PathBuf,
@@ -56,13 +56,22 @@ pub struct Store {
     dir: PathBuf,
 }
 
-impl Store {
-    /// Opens the store in the platform config directory of `app_name`.
-    pub fn open(app_name: &str) -> Result<Self, StoreError> {
-        let dirs = ProjectDirs::from("", "", app_name).ok_or(StoreError::NoConfigDir)?;
-        Ok(Self::at(dirs.config_dir()))
-    }
+/// Platform directories of one app name: settings, data such as databases, and caches.
+#[derive(Debug, Clone)]
+pub struct AppDirs {
+    pub config: PathBuf,
+    pub data: PathBuf,
+    pub cache: PathBuf,
+}
 
+impl AppDirs {
+    pub fn new(app_name: &str) -> Result<Self, StoreError> {
+        let dirs = ProjectDirs::from("", "", app_name).ok_or(StoreError::NoAppDirs)?;
+        Ok(Self { config: dirs.config_dir().into(), data: dirs.data_dir().into(), cache: dirs.cache_dir().into() })
+    }
+}
+
+impl Store {
     pub fn at(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }

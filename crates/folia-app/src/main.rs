@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use folia_i18n::I18n;
-use folia_store::{GeneralSettings, Store};
+use folia_store::{AppDirs, GeneralSettings, Store};
 use folia_ui::Shell;
 use tracing_subscriber::EnvFilter;
 
@@ -15,7 +15,8 @@ fn main() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_env("FOLIA_LOG").unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let store = Store::open(APP_DIR)?;
+    let dirs = AppDirs::new(APP_DIR)?;
+    let store = Store::at(&dirs.config);
     let settings = store.load::<GeneralSettings>().unwrap_or_else(|err| {
         tracing::warn!(error = &err as &dyn std::error::Error, "general settings unreadable, using defaults");
         GeneralSettings::default()
