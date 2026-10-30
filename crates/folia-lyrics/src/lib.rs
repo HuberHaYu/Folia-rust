@@ -5,6 +5,7 @@ mod clock;
 mod hints;
 mod lrc;
 mod tagged;
+mod ttml;
 mod vtt;
 mod words;
 
@@ -60,10 +61,7 @@ pub fn parse(format: Format, content: &str, translation: &str, romanization: &st
         Format::Yrc => tagged::parse_yrc(content, translation, romanization),
         Format::Qrc => tagged::parse_qrc(content, translation, romanization),
         Format::Krc => tagged::parse_krc(content, translation, romanization),
-        Format::Ttml => {
-            tracing::warn!("TTML lyrics are not supported yet");
-            Lyrics::default()
-        }
+        Format::Ttml => ttml::parse(content),
     }
 }
 
