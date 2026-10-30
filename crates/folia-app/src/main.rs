@@ -6,8 +6,8 @@ use folia_store::{AppDirs, AppearanceSettings, GeneralSettings, PlaybackSettings
 use folia_ui::{Init, Shell};
 use tracing_subscriber::EnvFilter;
 
-// Debug builds keep their settings apart so development never touches a real install.
-const APP_DIR: &str = if cfg!(debug_assertions) { "Folia-dev" } else { "Folia" };
+// Debug builds keep their data apart from release ones, and both stay apart from the Electron app's "Folia" folder.
+const APP_DIR: &str = if cfg!(debug_assertions) { "Folia-rust-dev" } else { "Folia-rust" };
 const DEFAULT_LOG: &str = if cfg!(debug_assertions) { "debug,wgpu=warn,naga=warn,iced=info" } else { "info" };
 const WINDOW_SIZE: (f32, f32) = (1200.0, 800.0);
 

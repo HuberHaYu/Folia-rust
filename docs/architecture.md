@@ -22,7 +22,7 @@
 ## 启动流程
 
 1. `folia-app/src/main.rs` 按 `FOLIA_LOG` 或默认级别初始化 `tracing`。
-2. `AppDirs::new(APP_DIR)` 取配置/数据/缓存目录：debug 为 `Folia-dev`，release 为 `Folia`。
+2. `AppDirs::new(APP_DIR)` 取配置/数据/缓存目录：debug 为 `Folia-rust-dev`，release 为 `Folia-rust`（原 Electron 版占用 `%APPDATA%\Folia`，不得复用）。
 3. `Store::load_or_default` 读 `general.toml`、`appearance.toml`、`playback.toml`；读不了的记警告并用默认值。
 4. `LanguagePreference::resolve` 结合 `sys_locale::get_locale()` 得到语言，构造 `I18n`。
 5. 组装 `folia_ui::Init`（含 `library_db = <data>/library.db` 与命令行里的音频文件），`iced::application` 以 `Shell::new` 启动，窗口 1200×800。
@@ -64,7 +64,9 @@
 - `folia_visualizer::Scene { style, lyrics, time, theme, font_scale }` 实现 `canvas::Program`，背景色 + 按 `style` 分派到 `styles::<style>::draw`。
 - 每一帧是播放时间的纯函数：词的状态切换时刻由歌词时间算出，弹簧用解析解、tween 用 CSS cubic-bezier（`anim.rs`），没有逐帧状态；暂停即冻结、跳转即正确。
 - 需要测文字的布局按行缓存在 `SceneState` 的 `LayoutCache` 里（按行开始时间、画布尺寸、字号比例取键，最多 4 行）。
-- 新增样式：建 `src/styles/<id>/`，在 `registry.rs` 的 `Style` 加一项（id 同原版、显示名 i18n 键），在 `lib.rs` 的 `draw` 分派里加一行，在 `SceneState` 加该样式的缓存字段（如需要）。第二个样式落地时，若分派开始重复，再抽成 trait。
+- 已有样式：`classic`（流光，逐帧动画）、`still`（静止，三行静态歌词，几何用 iced `Cache` 缓存，只在行变化或尺寸变化时重画，帧率上限 10）。
+- 新增样式：建 `src/styles/<id>/`（或单文件 `<id>.rs`），在 `registry.rs` 的 `Style` 加一项（id 同原版、显示名 i18n 键、`max_fps`），在 `lib.rs` 的 `draw` 分派里加一行，在 `SceneState` 加该样式的缓存字段（如需要）。目前两个样式只在 `draw` 一处分派，尚不需要 trait。
+- 正在播放页的重绘频率 = min(设置的帧率上限, 样式的 `max_fps`)；两者都不限时用 `window::frames()`。
 - 流光（classic）与原版的差异：中文按单字排版（原版 CJK 语义分词未移植）；没有 CSS blur（入场/离场只做透明度与缩放）；发光为整词放大光晕而非逐字母扫光；副标题区只显示翻译。
 
 ## 设置
@@ -72,7 +74,7 @@
 | 文件 | 类型 | 字段 |
 |---|---|---|
 | `general.toml` | `GeneralSettings` | `language`（`system` 或语言代码） |
-| `appearance.toml` | `AppearanceSettings` | `theme`（dark/light）、`frame_rate`（30/45/60/90/120/display）、`lyrics_font_scale` |
+| `appearance.toml` | `AppearanceSettings` | `theme`（dark/light）、`frame_rate`（30/45/60/90/120/display）、`lyrics_font_scale`、`visualizer`（样式 id，默认 `classic`） |
 | `playback.toml` | `PlaybackSettings` | `volume`（0–1）、`repeat`（off/all/one） |
 
 - 每个领域一个文件，类型实现 `Domain`（`FILE`、`SCHEMA_VERSION`）；首行 `schema_version = N`；结构体加 `#[serde(default)]`，新增字段不升版本，改名或改类型必须升版本并写迁移。
@@ -93,7 +95,7 @@
 | 命令 | `cargo run -p folia-app -- [音频文件…]` | `cargo build --release -p folia-app` |
 | 控制台窗口 | 有 | 无 |
 | 默认日志 | `debug`（wgpu、naga 为 `warn`） | `info` |
-| 设置与数据目录 | `Folia-dev` | `Folia` |
+| 设置与数据目录 | `Folia-rust-dev` | `Folia-rust` |
 | 优化 | 无 | `lto`、`codegen-units = 1`、`strip` |
 
 ## 测试
@@ -108,5 +110,5 @@ cargo test --manifest-path test/Cargo.toml
 
 ## 当前状态与性能
 
-- 能扫描本地文件夹、播放、暂停、跳转、调音量、切换重复模式；搜索并播放网易云歌曲（含歌词）；显示流光动画与翻译；切换语言、主题、帧率上限。
+- 能扫描本地文件夹、播放、暂停、跳转、调音量、切换重复模式；搜索并播放网易云歌曲（含歌词）；显示流光/静止两种歌词样式与翻译；切换语言、主题、歌词样式、帧率上限。
 - release 构建（Windows，Intel Arc A580）：空闲 CPU 0%；正在播放页 60 FPS 动画时 CPU 0.16%（20 逻辑核折算）、GPU 3D 约 3.5%、工作集约 116 MB。
