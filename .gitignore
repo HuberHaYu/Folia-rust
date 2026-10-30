@@ -1,0 +1,9 @@
+/target/
+/test/
+*.local.toml
+.env
+.env.*
+*.log
+.vscode/
+.idea/
+.DS_Store
