@@ -1,7 +1,5 @@
 // Appearance preferences: theme, lyric animation style and how often it may redraw.
 
-use std::time::Duration;
-
 use folia_core::Theme;
 use serde::{Deserialize, Serialize};
 
@@ -56,10 +54,6 @@ impl FrameRate {
             FrameRate::Display => None,
         }
     }
-
-    pub fn interval(self) -> Option<Duration> {
-        self.fps().map(|fps| Duration::from_secs_f64(1.0 / f64::from(fps)))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,11 +62,18 @@ pub struct AppearanceSettings {
     pub theme: ThemeMode,
     pub frame_rate: FrameRate,
     pub lyrics_font_scale: f32,
+    /// Id of the lyric animation style, as the original app names it.
+    pub visualizer: String,
 }
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
-        Self { theme: ThemeMode::Dark, frame_rate: FrameRate::Fps60, lyrics_font_scale: 1.0 }
+        Self {
+            theme: ThemeMode::Dark,
+            frame_rate: FrameRate::Fps60,
+            lyrics_font_scale: 1.0,
+            visualizer: "classic".to_owned(),
+        }
     }
 }
 

@@ -67,7 +67,7 @@ pub fn draw(scene: &Scene<'_>, cache: &mut LayoutCache<LineLayout>, frame: &mut 
 fn build(line: &Line, scene: &Scene<'_>, size: Size, tuning: ClassicTuning) -> Rc<LineLayout> {
     let font_px = font_px(size.width, scene.font_scale);
     let texts: Vec<String> = line.words.iter().map(|word| word.text.clone()).collect();
-    let widths: Vec<f32> = texts.iter().map(|text| measure(text, font_px)).collect();
+    let widths: Vec<f32> = texts.iter().map(|text| measure(text, font_px, crate::BOLD, f32::INFINITY).width).collect();
     let seed = line.start;
     let interlude = line.is_interlude();
     let configs = word_configs(seed, scene.theme.intensity, interlude, &widths, font_px, tuning);

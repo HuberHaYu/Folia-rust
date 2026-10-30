@@ -31,6 +31,7 @@ pub struct Scene<'a> {
 #[derive(Default)]
 pub struct SceneState {
     classic: RefCell<LayoutCache<styles::classic::LineLayout>>,
+    still: styles::still::StillCache,
 }
 
 impl<Message> canvas::Program<Message> for Scene<'_> {
@@ -44,12 +45,16 @@ impl<Message> canvas::Program<Message> for Scene<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(iced::Point::ORIGIN, bounds.size(), color(self.theme.background, 1.0));
+        let size = bounds.size();
         match self.style {
-            Style::Classic => styles::classic::draw(self, &mut state.classic.borrow_mut(), &mut frame, bounds.size()),
+            Style::Classic => {
+                let mut frame = Frame::new(renderer, size);
+                frame.fill_rectangle(iced::Point::ORIGIN, size, color(self.theme.background, 1.0));
+                styles::classic::draw(self, &mut state.classic.borrow_mut(), &mut frame, size);
+                vec![frame.into_geometry()]
+            }
+            Style::Still => vec![styles::still::draw(self, &state.still, renderer, size)],
         }
-        vec![frame.into_geometry()]
     }
 }
 
@@ -98,18 +103,18 @@ pub fn color(rgb: Rgb, alpha: f32) -> Color {
     Color::from_rgba8(rgb.r, rgb.g, rgb.b, alpha.clamp(0.0, 1.0))
 }
 
-/// Width of `content` set in the bold lyric font at `size` pixels.
-pub fn measure(content: &str, size: f32) -> f32 {
+/// Size of `content` set in `font` at `size` pixels, wrapping at word boundaries past `max_width`.
+pub fn measure(content: &str, size: f32, font: Font, max_width: f32) -> Size {
     let paragraph = <Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
         content,
-        bounds: Size::INFINITE,
+        bounds: Size::new(max_width, f32::INFINITY),
         size: size.into(),
         line_height: core_text::LineHeight::Relative(1.22),
-        font: BOLD,
+        font,
         align_x: core_text::Alignment::Default,
         align_y: iced::alignment::Vertical::Top,
         shaping: core_text::Shaping::Advanced,
-        wrapping: core_text::Wrapping::None,
+        wrapping: core_text::Wrapping::Word,
     });
-    paragraph.min_width()
+    paragraph.min_bounds()
 }

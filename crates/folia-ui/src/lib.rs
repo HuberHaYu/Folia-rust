@@ -58,6 +58,7 @@ pub enum Message {
     LanguagePicked(LanguagePreference),
     Theme(ThemeMode),
     FrameRate(FrameRate),
+    Visualizer(Style),
     Library(library::Message),
     Search(search::Message),
     Playback(playback::Message),
@@ -134,6 +135,10 @@ impl Shell {
                 self.appearance.frame_rate = rate;
                 save(&self.store, &self.appearance)
             }
+            Message::Visualizer(style) => {
+                self.appearance.visualizer = style.id().to_owned();
+                save(&self.store, &self.appearance)
+            }
             Message::Library(message) => {
                 let (task, play) = self.library.update(message);
                 let task = task.map(Message::Library);
@@ -181,7 +186,7 @@ impl Shell {
             }
             Page::NowPlaying => {
                 let scene = Scene {
-                    style: Style::Classic,
+                    style: self.style(),
                     lyrics: self.playback.lyrics.as_ref().unwrap_or(&self.empty_lyrics),
                     time: self.playback.position(),
                     theme: &self.theme,
@@ -189,7 +194,7 @@ impl Shell {
                 };
                 now_playing::view(scene, &self.i18n, muted)
             }
-            Page::Settings => settings::view(&self.i18n, self.general.language, &self.appearance, muted),
+            Page::Settings => settings::view(&self.i18n, self.general.language, &self.appearance, self.style(), muted),
         };
         let bar = player_bar::view(&self.playback, &self.i18n, text_color, muted).map(Message::Playback);
         column![self.navigation(text_color, muted), container(page).height(Length::Fill), rule::horizontal(1), bar]
@@ -205,10 +210,18 @@ impl Shell {
         if self.page != Page::NowPlaying {
             return iced::time::every(std::time::Duration::from_millis(250)).map(tick);
         }
-        match self.appearance.frame_rate.interval() {
-            Some(interval) => iced::time::every(interval).map(tick),
+        let fps = match (self.appearance.frame_rate.fps(), self.style().max_fps()) {
+            (Some(setting), Some(cap)) => Some(setting.min(cap)),
+            (setting, cap) => setting.or(cap),
+        };
+        match fps {
+            Some(fps) => iced::time::every(std::time::Duration::from_secs_f64(1.0 / f64::from(fps))).map(tick),
             None => iced::window::frames().map(tick),
         }
+    }
+
+    fn style(&self) -> Style {
+        Style::from_id(&self.appearance.visualizer).unwrap_or_default()
     }
 
     fn navigation(&self, text_color: Color, muted: Color) -> Element<'_, Message> {

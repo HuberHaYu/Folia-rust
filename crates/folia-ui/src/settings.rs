@@ -3,6 +3,7 @@
 use folia_core::{Language, LanguagePreference};
 use folia_i18n::I18n;
 use folia_store::{AppearanceSettings, FrameRate, ThemeMode};
+use folia_visualizer::Style;
 use iced::widget::{column, pick_list, row, text};
 use iced::{Alignment, Color, Element, Length};
 
@@ -25,6 +26,7 @@ pub fn view<'a>(
     i18n: &'a I18n,
     language: LanguagePreference,
     appearance: &AppearanceSettings,
+    style: Style,
     muted: Color,
 ) -> Element<'a, Message> {
     let theme_label = |mode: ThemeMode| Choice {
@@ -46,6 +48,8 @@ pub fn view<'a>(
         .chain(Language::ALL.map(LanguagePreference::Fixed))
         .map(language_label)
         .collect();
+    let style_label = |style: Style| Choice { value: style, label: i18n.t(style.label_key()).to_owned() };
+    let styles: Vec<_> = Style::ALL.into_iter().map(style_label).collect();
     let themes: Vec<_> = [ThemeMode::Dark, ThemeMode::Light].into_iter().map(theme_label).collect();
     let rates: Vec<_> = FrameRate::ALL.into_iter().map(frame_label).collect();
 
@@ -63,6 +67,10 @@ pub fn view<'a>(
             pick_list(themes, Some(theme_label(appearance.theme)), |choice: Choice<ThemeMode>| Message::Theme(
                 choice.value
             )),
+        ),
+        setting(
+            i18n.t("ui.visualizer"),
+            pick_list(styles, Some(style_label(style)), |choice: Choice<Style>| Message::Visualizer(choice.value)),
         ),
         setting(
             i18n.t("options.visualizerFrameRate"),
