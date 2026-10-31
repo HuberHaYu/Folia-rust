@@ -58,12 +58,16 @@ pub enum Message {
     LanguagePicked(LanguagePreference),
     Theme(ThemeMode),
     FrameRate(FrameRate),
-    Visualizer(Style),
+    /// A fixed lyric style, or `None` for a random style per song.
+    Visualizer(Option<Style>),
     Library(library::Message),
     Search(search::Message),
     Playback(playback::Message),
     OpenFiles(Vec<Track>),
 }
+
+/// Settings id of the random lyric style choice, as in the original app.
+const RANDOM_STYLE: &str = "random";
 
 pub struct Shell {
     store: Store,
@@ -136,7 +140,7 @@ impl Shell {
                 save(&self.store, &self.appearance)
             }
             Message::Visualizer(style) => {
-                self.appearance.visualizer = style.id().to_owned();
+                self.appearance.visualizer = style.map_or(RANDOM_STYLE, Style::id).to_owned();
                 save(&self.store, &self.appearance)
             }
             Message::Library(message) => {
@@ -194,7 +198,9 @@ impl Shell {
                 };
                 now_playing::view(scene, &self.i18n, muted)
             }
-            Page::Settings => settings::view(&self.i18n, self.general.language, &self.appearance, self.style(), muted),
+            Page::Settings => {
+                settings::view(&self.i18n, self.general.language, &self.appearance, self.chosen_style(), muted)
+            }
         };
         let bar = player_bar::view(&self.playback, &self.i18n, text_color, muted).map(Message::Playback);
         column![self.navigation(text_color, muted), container(page).height(Length::Fill), rule::horizontal(1), bar]
@@ -221,7 +227,18 @@ impl Shell {
     }
 
     fn style(&self) -> Style {
-        Style::from_id(&self.appearance.visualizer).unwrap_or_default()
+        match self.chosen_style() {
+            Some(style) => style,
+            None => Style::random_for(self.playback.current().map_or(0, |track| track.id)),
+        }
+    }
+
+    /// The style picked in settings; `None` means a random style per song.
+    fn chosen_style(&self) -> Option<Style> {
+        if self.appearance.visualizer == RANDOM_STYLE {
+            return None;
+        }
+        Some(Style::from_id(&self.appearance.visualizer).unwrap_or_default())
     }
 
     fn navigation(&self, text_color: Color, muted: Color) -> Element<'_, Message> {

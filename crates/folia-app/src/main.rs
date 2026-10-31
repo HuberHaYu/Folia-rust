@@ -8,7 +8,8 @@ use tracing_subscriber::EnvFilter;
 
 // Debug builds keep their data apart from release ones, and both stay apart from the Electron app's "Folia" folder.
 const APP_DIR: &str = if cfg!(debug_assertions) { "Folia-rust-dev" } else { "Folia-rust" };
-const DEFAULT_LOG: &str = if cfg!(debug_assertions) { "debug,wgpu=warn,naga=warn,iced=info" } else { "info" };
+const DEFAULT_LOG: &str =
+    if cfg!(debug_assertions) { "debug,wgpu=warn,naga=warn,iced=info,cosmic_text=warn" } else { "info" };
 const WINDOW_SIZE: (f32, f32) = (1200.0, 800.0);
 
 fn main() -> anyhow::Result<()> {

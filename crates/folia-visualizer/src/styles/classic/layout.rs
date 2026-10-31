@@ -2,6 +2,8 @@
 
 use folia_core::AnimationIntensity;
 
+use crate::styles::glow::WordConfig;
+
 /// Classic style tuning with the original defaults.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClassicTuning {
@@ -23,17 +25,6 @@ pub enum Justify {
     End,
     Around,
     Between,
-}
-
-/// One word's resting geometry; offsets in pixels, angles in degrees.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WordConfig {
-    pub x: f64,
-    pub y: f64,
-    pub rotate: f64,
-    pub scale: f64,
-    pub passed_rotate: f64,
-    pub margin_right: f64,
 }
 
 /// A word box placed by the wrap layout; `x`/`y` is its centre before animation offsets.

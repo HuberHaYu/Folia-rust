@@ -3,13 +3,17 @@
 mod align;
 mod clock;
 mod hints;
+mod layout;
 mod lrc;
+mod sentences;
 mod tagged;
 mod ttml;
 mod vtt;
 mod words;
 
 pub use hints::{RenderHints, Reveal, Transition, active_line};
+pub use layout::{LayoutUnit, display_words, layout_units};
+pub use sentences::{is_js_space, split_sentences};
 
 use folia_core::Lyrics;
 

@@ -10,6 +10,8 @@ license.workspace = true
 folia-core.workspace = true
 folia-lyrics.workspace = true
 iced.workspace = true
+icu_segmenter.workspace = true
+lyon_path.workspace = true
 
 [lints]
 workspace = true
