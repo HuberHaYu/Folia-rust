@@ -10,7 +10,31 @@ use tracing_subscriber::EnvFilter;
 const APP_DIR: &str = if cfg!(debug_assertions) { "Folia-rust-dev" } else { "Folia-rust" };
 const DEFAULT_LOG: &str =
     if cfg!(debug_assertions) { "debug,wgpu=warn,naga=warn,iced=info,cosmic_text=warn" } else { "info" };
-const WINDOW_SIZE: (f32, f32) = (1200.0, 800.0);
+const WINDOW_SIZE: iced::Size = iced::Size::new(1200.0, 800.0);
+
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: WINDOW_SIZE,
+        min_size: Some(iced::Size::new(350.0, 100.0)),
+        decorations: false,
+        platform_specific: platform_window(),
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_window() -> iced::window::settings::PlatformSpecific {
+    iced::window::settings::PlatformSpecific {
+        undecorated_shadow: true,
+        corner_preference: iced::window::settings::platform::CornerPreference::Round,
+        ..Default::default()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_window() -> iced::window::settings::PlatformSpecific {
+    iced::window::settings::PlatformSpecific::default()
+}
 
 fn main() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_env("FOLIA_LOG").unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
@@ -38,7 +62,7 @@ fn main() -> anyhow::Result<()> {
         .title(Shell::title)
         .theme(Shell::theme)
         .subscription(Shell::subscription)
-        .window_size(WINDOW_SIZE)
+        .window(window_settings())
         .run()?;
     Ok(())
 }

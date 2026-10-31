@@ -40,6 +40,12 @@ visualizerClassic = "Classic"
 visualizerTilt = "Tilt"
 options = "Tùy chọn"
 back = "Quay lại"
+enterFullscreen = "Toàn màn hình"
+exitFullscreen = "Thoát toàn màn hình"
+minimizeWindow = "Thu nhỏ"
+maximizeWindow = "Phóng to"
+restoreWindow = "Khôi phục"
+close = "Đóng"
 
 [localMusic]
 allSongs = "Tất cả bài hát"

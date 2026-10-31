@@ -8,11 +8,13 @@ license.workspace = true
 
 [dependencies]
 folia-core.workspace = true
+folia-lyrics.workspace = true
 folia-i18n.workspace = true
 folia-library.workspace = true
 folia-omni.workspace = true
 folia-player.workspace = true
 folia-store.workspace = true
+folia-render.workspace = true
 folia-visualizer.workspace = true
 iced.workspace = true
 lucide-static-svg.workspace = true

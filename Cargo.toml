@@ -20,9 +20,12 @@ folia-library = { path = "crates/folia-library" }
 folia-omni = { path = "crates/folia-omni" }
 folia-player = { path = "crates/folia-player" }
 folia-visualizer = { path = "crates/folia-visualizer" }
+folia-render = { path = "crates/folia-render" }
 
 anyhow = "1.0.104"
 base64 = "0.23.1"
+bytemuck = "1.25.2"
+wgpu = "27.0.1"
 cpal = "0.18.2"
 directories = "6.0.0"
 encoding_rs = "0.8.44"

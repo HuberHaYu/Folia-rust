@@ -1,0 +1,15 @@
+[package]
+name = "folia-render"
+description = "Shared wgpu passes for Folia: vignette, grain and the subtitle glow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+iced.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

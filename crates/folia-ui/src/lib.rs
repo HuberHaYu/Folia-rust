@@ -1,9 +1,11 @@
 // Top-level UI: pages, navigation and the iced update/view/subscription functions that drive them.
 
 mod background;
+mod chrome;
 mod icons;
 mod library;
 mod now_playing;
+mod overlay;
 mod playback;
 mod player_bar;
 mod search;
@@ -11,6 +13,11 @@ mod settings;
 mod track_list;
 
 pub use background::{error_chain, format_time};
+pub use overlay::{
+    CAPSULE_COLLAPSE_MS, CAPSULE_EXPAND_MS, CAPSULE_FADE_MS, CHROME_HOLD_MS, CHROME_LEAVE_MS, CapsuleFade,
+    CapsuleHover, ChromeClock, GLOW_BLUR_PX, GlowEllipse, Subtitle, capsule_open, capsule_width, ease_out,
+    glow_coverage, glow_ellipse, row_gap, subtitle_at, subtitle_line_width, translation_px, upcoming_look, upcoming_px,
+};
 
 use std::path::PathBuf;
 
@@ -19,8 +26,8 @@ use folia_i18n::I18n;
 use folia_omni::Omni;
 use folia_store::{AppearanceSettings, FrameRate, GeneralSettings, PlaybackSettings, Store, ThemeMode};
 use folia_visualizer::{Scene, Style};
-use iced::widget::{button, column, container, row, rule, space};
-use iced::{Alignment, Color, Element, Length, Subscription, Task};
+use iced::widget::{button, column, container, mouse_area, row, rule, space, stack};
+use iced::{Alignment, Color, Element, Length, Size, Subscription, Task};
 use lucide_static_svg::Icon;
 
 use crate::background::save;
@@ -64,6 +71,16 @@ pub enum Message {
     Search(search::Message),
     Playback(playback::Message),
     OpenFiles(Vec<Track>),
+    Chrome(chrome::Message),
+    WindowReady(Option<iced::window::Id>),
+    WindowResized(Size),
+    Maximized(bool),
+    ChromeTick,
+    PointerHeld(bool),
+    RevealChrome,
+    CapsuleInside(bool),
+    CapsuleFrame,
+    ToggleFullscreen,
 }
 
 /// Settings id of the random lyric style choice, as in the original app.
@@ -83,6 +100,20 @@ pub struct Shell {
     omni: Option<Omni>,
     playback: Playback,
     empty_lyrics: Lyrics,
+    window: Option<iced::window::Id>,
+    maximized: bool,
+    fullscreen: bool,
+    /// Origin for [`ChromeClock`] milliseconds.
+    started: std::time::Instant,
+    clock: ChromeClock,
+    capsule: CapsuleHover,
+    /// Linear width of the capsule, 0 collapsed and 1 expanded, before easing.
+    capsule_fade: CapsuleFade,
+    window_size: Size,
+    pointer_held: bool,
+    /// Press on the drag strip, and the pointer position of the first move after it.
+    drag_armed: bool,
+    drag_from: Option<(f32, f32)>,
 }
 
 impl Shell {
@@ -106,9 +137,21 @@ impl Shell {
             playback: Playback::new(init.playback, omni.clone()),
             omni,
             empty_lyrics: Lyrics::default(),
+            window: None,
+            maximized: false,
+            fullscreen: false,
+            started: std::time::Instant::now(),
+            clock: ChromeClock::shown(0),
+            capsule: CapsuleHover::collapsed(0),
+            capsule_fade: CapsuleFade::settled(0.0, 0),
+            window_size: Size::new(1200.0, 800.0),
+            pointer_held: false,
+            drag_armed: false,
+            drag_from: None,
         };
         let open = if init.open_files.is_empty() { Task::none() } else { open_files(init.open_files) };
-        (shell, Task::batch([load.map(Message::Library), open]))
+        let window = iced::window::oldest().map(Message::WindowReady);
+        (shell, Task::batch([load.map(Message::Library), open, window]))
     }
 
     pub fn title(&self) -> String {
@@ -126,6 +169,9 @@ impl Shell {
         match message {
             Message::Navigate(page) => {
                 self.page = page;
+                if page == Page::NowPlaying {
+                    self.reveal_chrome();
+                }
                 Task::none()
             }
             Message::LanguagePicked(preference) => self.set_language(preference),
@@ -149,6 +195,7 @@ impl Shell {
                 match play {
                     Some(index) => {
                         self.page = Page::NowPlaying;
+                        self.reveal_chrome();
                         let start = self.playback.play(self.library.tracks.clone(), index).map(Message::Playback);
                         Task::batch([task, start])
                     }
@@ -161,6 +208,7 @@ impl Shell {
                 match play {
                     Some(index) => {
                         self.page = Page::NowPlaying;
+                        self.reveal_chrome();
                         let start = self.playback.play(self.search.results.clone(), index).map(Message::Playback);
                         Task::batch([task, start])
                     }
@@ -170,9 +218,130 @@ impl Shell {
             Message::Playback(message) => self.playback.update(message, &self.store).map(Message::Playback),
             Message::OpenFiles(tracks) if !tracks.is_empty() => {
                 self.page = Page::NowPlaying;
+                self.reveal_chrome();
                 self.playback.play(tracks, 0).map(Message::Playback)
             }
             Message::OpenFiles(_) => Task::none(),
+            Message::WindowReady(id) => {
+                self.window = id.or(self.window);
+                Task::none()
+            }
+            Message::WindowResized(size) => {
+                self.window_size = size;
+                match self.window {
+                    Some(id) => iced::window::is_maximized(id).map(Message::Maximized),
+                    None => Task::none(),
+                }
+            }
+            Message::Maximized(maximized) => {
+                self.maximized = maximized;
+                Task::none()
+            }
+            Message::ChromeTick => {
+                self.clock = self.clock.tick(self.now_ms(), self.pointer_held);
+                Task::none()
+            }
+            Message::PointerHeld(held) => {
+                self.pointer_held = held;
+                if !held {
+                    self.drag_armed = false;
+                    self.drag_from = None;
+                }
+                if self.page == Page::NowPlaying {
+                    self.reveal_chrome();
+                }
+                Task::none()
+            }
+            Message::RevealChrome => {
+                if self.page == Page::NowPlaying {
+                    self.reveal_chrome();
+                }
+                Task::none()
+            }
+            Message::CapsuleInside(inside) => {
+                self.capsule = self.capsule.set_inside(self.now_ms(), inside);
+                Task::none()
+            }
+            Message::CapsuleFrame => {
+                let now = self.now_ms();
+                self.capsule = self.capsule.step(now);
+                self.capsule_fade = self.capsule_fade.retarget(now, self.capsule_goal());
+                Task::none()
+            }
+            Message::ToggleFullscreen => self.toggle_fullscreen(),
+            Message::Chrome(message) => self.chrome(message),
+        }
+    }
+
+    /// Starts a window drag once the pointer has moved 4px from where the press was first seen.
+    fn drag_move(&mut self, id: iced::window::Id, x: f32, y: f32) -> Task<Message> {
+        if !self.drag_armed {
+            return Task::none();
+        }
+        let Some((origin_x, origin_y)) = self.drag_from else {
+            self.drag_from = Some((x, y));
+            return Task::none();
+        };
+        let dx = x - origin_x;
+        let dy = y - origin_y;
+        if dx * dx + dy * dy < 16.0 {
+            return Task::none();
+        }
+        self.drag_armed = false;
+        self.drag_from = None;
+        iced::window::drag(id)
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn reveal_chrome(&mut self) {
+        self.clock = self.clock.reveal(self.now_ms());
+    }
+
+    fn toggle_fullscreen(&mut self) -> Task<Message> {
+        let Some(id) = self.window else {
+            return iced::window::oldest().map(Message::WindowReady);
+        };
+        self.fullscreen = !self.fullscreen;
+        let mode = if self.fullscreen { iced::window::Mode::Fullscreen } else { iced::window::Mode::Windowed };
+        iced::window::set_mode(id, mode)
+    }
+
+    fn chrome(&mut self, message: chrome::Message) -> Task<Message> {
+        let Some(id) = self.window else {
+            return iced::window::oldest().map(Message::WindowReady);
+        };
+        match message {
+            chrome::Message::Drag => iced::window::drag(id),
+            chrome::Message::DragArm => {
+                self.drag_armed = true;
+                self.drag_from = None;
+                Task::none()
+            }
+            chrome::Message::DragMove { x, y } => self.drag_move(id, x, y),
+            chrome::Message::DragEnd => {
+                self.drag_armed = false;
+                self.drag_from = None;
+                Task::none()
+            }
+            chrome::Message::Resize(direction) => iced::window::drag_resize(id, direction),
+            chrome::Message::Minimize => iced::window::minimize(id, true),
+            chrome::Message::ToggleMaximize => {
+                self.maximized = !self.maximized;
+                iced::window::toggle_maximize(id)
+            }
+            chrome::Message::ToggleFullscreen => self.toggle_fullscreen(),
+            chrome::Message::Close => iced::window::close(id),
+            chrome::Message::Activity { x, y } => {
+                self.clock = self.clock.pointer(self.now_ms(), x, y);
+                Task::none()
+            }
+            chrome::Message::Left => {
+                self.clock = self.clock.leave(self.now_ms(), self.pointer_held);
+                Task::none()
+            }
         }
     }
 
@@ -189,41 +358,175 @@ impl Shell {
                 self.search.view(&self.i18n, muted, playing).map(Message::Search)
             }
             Page::NowPlaying => {
+                let lyrics = self.playback.lyrics.as_ref().unwrap_or(&self.empty_lyrics);
                 let scene = Scene {
                     style: self.style(),
-                    lyrics: self.playback.lyrics.as_ref().unwrap_or(&self.empty_lyrics),
+                    lyrics,
                     time: self.playback.position(),
                     theme: &self.theme,
                     font_scale: self.appearance.lyrics_font_scale,
                 };
-                now_playing::view(scene, &self.i18n, muted)
+                let subtitle = self.subtitle();
+                let bottom = if self.chrome_visible() { SUBTITLE_BOTTOM_OPEN } else { SUBTITLE_BOTTOM_HIDDEN };
+                let background = folia_visualizer::color(self.theme.background, 1.0);
+                now_playing::view(scene, &self.i18n, muted, background, self.window_size, subtitle, bottom)
             }
             Page::Settings => {
                 settings::view(&self.i18n, self.general.language, &self.appearance, self.chosen_style(), muted)
             }
         };
-        let bar = player_bar::view(&self.playback, &self.i18n, text_color, muted).map(Message::Playback);
-        column![self.navigation(text_color, muted), container(page).height(Length::Fill), rule::horizontal(1), bar]
-            .into()
+        let playing = self.page == Page::NowPlaying;
+        let daylight = self.appearance.theme == ThemeMode::Light;
+        let mut frame: iced::widget::Stack<'_, Message, iced::Theme, iced::Renderer> = if playing {
+            stack![page, chrome::drag_strip().map(Message::Chrome)]
+        } else {
+            let bar = player_bar::view(&self.playback, &self.i18n, text_color, muted).map(Message::Playback);
+            stack![
+                column![
+                    self.navigation(text_color, muted),
+                    container(page).height(Length::Fill),
+                    rule::horizontal(1),
+                    bar
+                ],
+                chrome::drag_strip().map(Message::Chrome),
+            ]
+        };
+        if playing && self.back_hotspot() {
+            let back = chrome::round_button(
+                Icon::ChevronLeft,
+                20.0,
+                40.0,
+                Color { a: 0.2, ..Color::BLACK },
+                Color { r: 1.0, g: 1.0, b: 1.0, a: 0.6 },
+                self.i18n.t("ui.back"),
+                Message::Navigate(Page::Library),
+            );
+            frame = frame.push(pin(
+                back,
+                Alignment::Start,
+                Alignment::Start,
+                iced::Padding { top: 24.0, right: 0.0, bottom: 0.0, left: 24.0 },
+            ));
+        }
+        if playing && self.chrome_visible() {
+            let openness = overlay::ease_out(self.capsule_fade.value(self.now_ms()));
+            let width = overlay::capsule_width(self.window_size.width, openness);
+            let bar = mouse_area(
+                player_bar::capsule(&self.playback, &self.i18n, text_color, muted, daylight, openness)
+                    .map(Message::Playback),
+            )
+            .on_enter(Message::CapsuleInside(true))
+            .on_exit(Message::CapsuleInside(false));
+            let bar = container(bar).width(Length::Fixed(width));
+            let floating = container(bar)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(iced::Padding { top: 0.0, right: 16.0, bottom: CAPSULE_BOTTOM, left: 16.0 })
+                .align_x(Alignment::Center)
+                .align_y(Alignment::End);
+            let settings_fill =
+                if daylight { Color { r: 1.0, g: 1.0, b: 1.0, a: 0.7 } } else { Color { a: 0.4, ..Color::BLACK } };
+            let settings_icon = if daylight { text_color } else { Color::WHITE };
+            let settings = chrome::round_button(
+                Icon::Settings2,
+                20.0,
+                48.0,
+                settings_fill,
+                settings_icon,
+                self.i18n.t("ui.options"),
+                Message::Navigate(Page::Settings),
+            );
+            frame = frame.push(floating).push(pin(
+                settings,
+                Alignment::End,
+                Alignment::End,
+                iced::Padding { top: 0.0, right: 32.0, bottom: CAPSULE_BOTTOM, left: 0.0 },
+            ));
+            // Above the drag strip, so the tabs receive clicks. The right inset clears the window buttons.
+            frame = frame.push(container(self.navigation(text_color, muted)).padding(iced::Padding {
+                top: 0.0,
+                right: 192.0,
+                bottom: 0.0,
+                left: 0.0,
+            }));
+        }
+        if !playing || self.chrome_visible() {
+            let controls = container(
+                chrome::controls(&self.i18n, text_color, self.maximized, self.fullscreen).map(Message::Chrome),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::End)
+            .align_y(Alignment::Start);
+            frame = frame.push(controls);
+        }
+        frame = frame.push(chrome::resize_frame().map(Message::Chrome)).push(chrome::activity().map(Message::Chrome));
+        frame.width(Length::Fill).height(Length::Fill).into()
+    }
+
+    fn chrome_visible(&self) -> bool {
+        self.page != Page::NowPlaying || self.clock.visible(self.now_ms(), self.pointer_held)
+    }
+
+    /// The original back button only appears inside the top-left 120px square.
+    fn back_hotspot(&self) -> bool {
+        self.clock.pointer.is_some_and(|(x, y)| x <= HOTSPOT && y <= HOTSPOT)
+    }
+
+    fn subtitle(&self) -> overlay::Subtitle<'_> {
+        if self.style() == Style::Still {
+            return overlay::Subtitle { translation: None, upcoming: None };
+        }
+        let Some(lyrics) = self.playback.lyrics.as_ref() else {
+            return overlay::Subtitle { translation: None, upcoming: None };
+        };
+        overlay::subtitle_at(&lyrics.lines, self.playback.position())
+    }
+
+    fn capsule_goal(&self) -> f32 {
+        let open =
+            overlay::capsule_open(self.capsule.expanded, self.playback.is_playing(), self.playback.duration() > 0.0);
+        if open { 1.0 } else { 0.0 }
+    }
+
+    fn capsule_live(&self) -> bool {
+        let waiting = self.capsule.inside != self.capsule.expanded;
+        waiting
+            || (self.capsule_fade.to - self.capsule_goal()).abs() > 0.001
+            || self.capsule_fade.running(self.now_ms())
     }
 
     /// Ticks only while music plays: every frame on the visualizer page, a few times a second elsewhere.
     pub fn subscription(&self) -> Subscription<Message> {
-        if !self.playback.is_playing() {
-            return Subscription::none();
+        let mut parts = Vec::new();
+        parts.push(iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)));
+        parts.push(iced::event::listen_with(fullscreen_key));
+        if self.page == Page::NowPlaying {
+            if self.clock.until_ms.is_some() {
+                parts.push(iced::time::every(std::time::Duration::from_millis(200)).map(|_| Message::ChromeTick));
+            }
+            if self.chrome_visible() && self.capsule_live() {
+                parts.push(iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::CapsuleFrame));
+            }
+            parts.push(iced::event::listen_with(chrome_pointer));
         }
-        let tick = |_| Message::Playback(playback::Message::Tick);
-        if self.page != Page::NowPlaying {
-            return iced::time::every(std::time::Duration::from_millis(250)).map(tick);
+        if self.playback.is_playing() {
+            let tick = |_| Message::Playback(playback::Message::Tick);
+            let playback = if self.page != Page::NowPlaying {
+                iced::time::every(std::time::Duration::from_millis(250)).map(tick)
+            } else {
+                let fps = match (self.appearance.frame_rate.fps(), self.style().max_fps()) {
+                    (Some(setting), Some(cap)) => Some(setting.min(cap)),
+                    (setting, cap) => setting.or(cap),
+                };
+                match fps {
+                    Some(fps) => iced::time::every(std::time::Duration::from_secs_f64(1.0 / f64::from(fps))).map(tick),
+                    None => iced::window::frames().map(tick),
+                }
+            };
+            parts.push(playback);
         }
-        let fps = match (self.appearance.frame_rate.fps(), self.style().max_fps()) {
-            (Some(setting), Some(cap)) => Some(setting.min(cap)),
-            (setting, cap) => setting.or(cap),
-        };
-        match fps {
-            Some(fps) => iced::time::every(std::time::Duration::from_secs_f64(1.0 / f64::from(fps))).map(tick),
-            None => iced::window::frames().map(tick),
-        }
+        Subscription::batch(parts)
     }
 
     fn style(&self) -> Style {
@@ -280,6 +583,41 @@ fn open_files(paths: Vec<PathBuf>) -> Task<Message> {
         paths.iter().filter(|path| folia_library::is_audio(path)).map(|path| folia_library::read_track(path)).collect()
     });
     Task::perform(work, |tracks| Message::OpenFiles(tracks.unwrap_or_default()))
+}
+
+/// Top-left square that reveals the back button, from `PLAYER_CHROME_HOTSPOT_SIZE`.
+const HOTSPOT: f32 = 120.0;
+/// Subtitle `bottom` while the capsule is on screen: baseline 32 plus 80px of clearance.
+const SUBTITLE_BOTTOM_OPEN: f32 = 112.0;
+/// Subtitle `bottom` once the capsule has hidden. The baseline itself stays at 32.
+const SUBTITLE_BOTTOM_HIDDEN: f32 = 32.0;
+/// Capsule `bottom`, the original `bottom-8`.
+const CAPSULE_BOTTOM: f32 = 32.0;
+
+fn pin<'a>(button: Element<'a, Message>, x: Alignment, y: Alignment, pad: iced::Padding) -> Element<'a, Message> {
+    container(button).width(Length::Fill).height(Length::Fill).align_x(x).align_y(y).padding(pad).into()
+}
+
+/// F11 toggles fullscreen, the shortcut listed in the original help.
+fn fullscreen_key(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    match event {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F11),
+            repeat: false,
+            ..
+        }) => Some(Message::ToggleFullscreen),
+        _ => None,
+    }
+}
+
+/// Presses keep the chrome up; a scroll wheel counts as activity. Neither captures the event.
+fn chrome_pointer(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::PointerHeld(true)),
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => Some(Message::PointerHeld(false)),
+        iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => Some(Message::RevealChrome),
+        _ => None,
+    }
 }
 
 fn iced_theme(theme: &Theme) -> iced::Theme {

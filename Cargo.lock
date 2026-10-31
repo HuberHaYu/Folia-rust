@@ -1290,6 +1290,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "folia-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "iced",
+ "wgpu",
+]
+
+[[package]]
 name = "folia-store"
 version = "0.1.0"
 dependencies = [
@@ -1308,8 +1317,10 @@ dependencies = [
  "folia-core",
  "folia-i18n",
  "folia-library",
+ "folia-lyrics",
  "folia-omni",
  "folia-player",
+ "folia-render",
  "folia-store",
  "folia-visualizer",
  "iced",

@@ -7,6 +7,8 @@ const LOG_OFFSET: f64 = 4.0;
 const CHAR_REF: f64 = 20.0;
 const LINE_THRESHOLDS: [f64; 3] = [0.45, 1.05, 1.7];
 const RESPLIT_THRESHOLD: f32 = 1.6;
+/// The most rows one lyric line is allowed to become. The original caps the resplit at 4.
+pub const MAX_ROWS: usize = 4;
 const SCALE_FLOOR_NORMAL: f32 = 0.55;
 const SCALE_FLOOR_TILT: f32 = 0.5;
 
@@ -50,7 +52,8 @@ pub fn seeded(seed: f64, offset: f64) -> f64 {
 pub fn line_count(char_count: usize, seed: f64, split_probability: f64) -> usize {
     let normalized = (char_count as f64 + LOG_OFFSET).ln() / (CHAR_REF + LOG_OFFSET).ln();
     let score = normalized * (seeded(seed, 1.0) * 0.6 + 0.7) * split_probability;
-    LINE_THRESHOLDS.iter().position(|threshold| score < *threshold).unwrap_or(3) + 1
+    let rows = LINE_THRESHOLDS.iter().position(|threshold| score < *threshold).map_or(MAX_ROWS, |index| index + 1);
+    rows.min(MAX_ROWS)
 }
 
 /// Splits `text` the way the tilt style does. `measure(text, tilt)` is the unscaled row width.
@@ -120,7 +123,7 @@ fn resplit(
     }
     let target_width = available * (RESPLIT_THRESHOLD - 0.15);
     let estimated = measure(text, false);
-    let extra = (segments.len() + 1).max((estimated / target_width).ceil() as usize).min(4);
+    let extra = (segments.len() + 1).max((estimated / target_width).ceil() as usize).min(MAX_ROWS);
     if extra <= segments.len() {
         return None;
     }

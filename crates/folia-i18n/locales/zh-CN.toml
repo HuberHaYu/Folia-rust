@@ -40,6 +40,12 @@ visualizerClassic = "流光"
 visualizerTilt = "倾诉"
 options = "选项"
 back = "返回"
+enterFullscreen = "进入全屏"
+exitFullscreen = "退出全屏"
+minimizeWindow = "最小化"
+maximizeWindow = "最大化"
+restoreWindow = "还原窗口"
+close = "关闭"
 
 [localMusic]
 allSongs = "全部歌曲"

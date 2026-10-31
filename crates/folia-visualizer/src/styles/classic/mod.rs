@@ -32,7 +32,7 @@ pub fn draw(scene: &Scene<'_>, cache: &mut LayoutCache<LineLayout>, frame: &mut 
     let center = Point::new(size.width / 2.0, size.height / 2.0);
     let (breath_y, breath_scale) = glow::breathing(scene.time, theme.intensity, tuning.breathing);
 
-    glow::visible_lines(&scene.lyrics.lines, scene.time, |line, opacity, scale, active| {
+    glow::visible_lines(&scene.lyrics.lines, scene.time, |line, opacity, scale, _active| {
         let layout = cache.get_or_insert(line, size, scene.font_scale, || build(line, scene, size, tuning));
         let hints = RenderHints::of(line);
         frame.with_save(|frame| {
@@ -50,9 +50,6 @@ pub fn draw(scene: &Scene<'_>, cache: &mut LayoutCache<LineLayout>, frame: &mut 
                 glow::draw_word(frame, theme, &word.text, *at, &pose, opacity, layout.font_px);
             }
         });
-        if active {
-            glow::draw_translation(frame, theme, line, size, scene.font_scale, opacity);
-        }
     });
 }
 

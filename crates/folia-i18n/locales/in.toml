@@ -40,6 +40,12 @@ visualizerClassic = "Luminous"
 visualizerTilt = "Tilt"
 options = "Opsi"
 back = "Kembali"
+enterFullscreen = "Masuk layar penuh"
+exitFullscreen = "Keluar layar penuh"
+minimizeWindow = "Minimalkan"
+maximizeWindow = "Maksimalkan"
+restoreWindow = "Pulihkan"
+close = "Tutup"
 
 [localMusic]
 allSongs = "Semua Lagu"

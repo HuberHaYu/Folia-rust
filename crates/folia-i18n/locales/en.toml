@@ -40,6 +40,12 @@ visualizerClassic = "Luminous"
 visualizerTilt = "Tilt"
 options = "Options"
 back = "Back"
+enterFullscreen = "Enter fullscreen"
+exitFullscreen = "Exit fullscreen"
+minimizeWindow = "Minimize"
+maximizeWindow = "Maximize"
+restoreWindow = "Restore"
+close = "Close"
 
 [localMusic]
 allSongs = "All Songs"

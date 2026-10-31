@@ -3,8 +3,8 @@
 mod layout;
 
 pub use layout::{
-    Arrangement, Segment, TiltTuning, arrange, char_pulse, line_count, revealed_through, seeded, segment_times,
-    visible_row_count,
+    Arrangement, MAX_ROWS, Segment, TiltTuning, arrange, char_pulse, line_count, revealed_through, seeded,
+    segment_times, visible_row_count,
 };
 
 use std::rc::Rc;
@@ -104,14 +104,11 @@ fn paint(
         }
         top += segment.height + gap;
     }
-    if !moment.exiting {
-        glow::draw_translation(frame, scene.theme, line, size, scene.font_scale, moment.opacity);
-    }
 }
 
 fn reveal_limit(line: &Line, segments: &[DrawnSegment], time: f64) -> usize {
-    let mut starts = [0.0; 4];
-    let count = segments.len().min(starts.len());
+    let mut starts = [0.0; MAX_ROWS];
+    let count = segments.len().min(MAX_ROWS);
     for (slot, segment) in segments.iter().take(count).enumerate() {
         starts[slot] = segment.start;
     }
