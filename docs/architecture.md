@@ -27,7 +27,7 @@
 3. `Store::load_or_default` 读 `general.toml`、`appearance.toml`、`playback.toml`；读不了的记警告并用默认值。
 4. `LanguagePreference::resolve` 结合 `sys_locale::get_locale()` 得到语言，构造 `I18n`。
 5. 组装 `folia_ui::Init`（含 `library_db = <data>/library.db` 与命令行里的音频文件），`iced::application` 以 `Shell::new` 启动，窗口 1200×800。
-6. `Shell::new` 后台读取音乐库索引；有命令行文件时读标签、排队播放并切到正在播放页。
+6. `Shell::new` 后台读取音乐库索引；有命令行文件时读标签、排队播放并切到正在播放页。窗口第一帧起盖首屏遮罩（`splash.rs`）。首页第一次收到资料库加载结果（成功或失败）并且之后画出一帧时开始 320ms 淡出；内容淡入仍从第一帧起算（延迟 180ms、时长 420ms），就绪早于 180ms 时内容不出现。逐帧订阅只到淡出结束。
 
 ## 线程
 
@@ -127,7 +127,9 @@
 - 首页与原版的差异：没有原版的块底板与空画框、正在播放大格子的进度条、悬停/聚焦动效、标题字距 −0.045em（iced 不支持字距）；颗粒是逐像素哈希的黑白点而非 soft-light 分形噪声；导航栏与播放栏仍是现有布局，原版首页是全屏墙面。
 - 主题：`folia_core::Theme::{MIDNIGHT, DAYLIGHT}` 为原版两套预设，`Shell` 由它生成 iced 调色板。
 - 图标：`lucide-static-svg` 的 `Icon`，经 `icons::icon` / `icon_button` 着色绘制。
-- 重绘：播放定时器只在播放中订阅。正在播放页按帧率上限（`FrameRate::Display` 用 `window::frames()`），其他页 250 ms。浮层的 200 ms 检查只在隐藏期限还在时订阅；胶囊的 16 ms 只在悬停延迟或宽度动画还没结束时订阅。不播放且浮层已隐藏时没有定时器。
+- 首屏遮罩（`splash.rs`，取数自 `index.html` `#app-splash` 与 `appSplash.ts`）：底色 `#09090b`，不跟主题。标题 `Folia` 五字，字号 `clamp(64px, 17vw, 200px)`、字重 600、行高 1、字距 0.06em、首行缩进 0.06em，与波形间距 28px。内容先透明，180ms 后用 CSS `ease`（`cubic-bezier(0.25, 0.1, 0.25, 1)`）在 420ms 内淡入。首页第一次收到资料库 `Loaded`（成功或失败都算），并且之后已经画出一帧时，整块遮罩立刻用同一条曲线淡出 320ms，然后从界面拿掉。这次就绪早于 180ms 时内容保持透明。波形 14 根，间距 `clamp(6px, 1.1vw, 11px)`，高 `clamp(42px, 7.5vw, 92px)`；每根 `scaleY` 在 `--floor` 与 `--peak` 之间按 `ease-in-out` 走 1100ms 的默认周期（实际 820–1500ms，相位为负延迟）。`--peak = min(1, 0.32 + sin((i+0.5)/n·π) · rand(0.38, 0.72))`，`--floor` 在 0.08–0.24，宽 3.5–6.5px，白色 alpha 0.55–1，辉光半径 6–26px。字母每 380ms 换 1 个，25% 的拍换 2 个；字族 BASE（`SansSerif`）、serif、monospace、cursive、fantasy、system-ui（`Segoe UI`），字重 400/600/800，25% 斜体，纵向缩放 0.86–1.12，横向再乘 0.86/0.94/1/1.06/1.12。盒子宽度是各字形在 100px、ExtraBold（含斜体）下的最大字宽 / 100 × 1.26 + 0.04em，只在内容还可能出现时测量；资料库在 180ms 内就绪则不测，也不建 canvas，遮罩只是一块随透明度变化的底色。canvas 画纯色盖层会留下约 20MB 的 GPU 专用内存。缩放原点在字盒垂直 78%。字母辉光不放大字形：按 `randomGlow` 三档取 1 或 2 个模糊半径（第三档省略 70–110px），每个半径在 1/3、2/3 和整半径处各 8 个方向，该层透明度均分到这 24 份，字号与正文字相同。只盖在整半径上时，8 个副本会分开成重影。竖条辉光是 6 层逐渐放大的圆角矩形，范围是 `--glow`，透明度按高斯衰减，各层之和为 0.35。未换字前的兜底辉光是样式表的 `8px / 0.55` 与 `28px / 0.3`。淡出一开始点击穿透，和 `.is-hiding { pointer-events: none }` 一样。计时从窗口第一帧起，不从进程启动起。
+- 首屏与原版的差异：字距用固定盒子加 0.06em 间隙，不是 CSS `letter-spacing`。辉光是同字号的环形偏移和分层圆角矩形，不是 `text-shadow` / `box-shadow` 的真实高斯模糊；第三档最外圈 70–110px 不画。字母只有 1:1 的那一档进字形图集：iced 会把等比缩放后的字号各留一份且不缩小，比例相等又不等于 1 时改为略微不等的轮廓缩放。没有单独的 Inter 字体，BASE 用 iced 的 `SansSerif`，`system-ui` 用 Segoe UI。不读 `prefers-reduced-motion`。遮罩不覆盖进程启动到窗口出现之前的时间。
+- 重绘：播放定时器只在播放中订阅。正在播放页按帧率上限（`FrameRate::Display` 用 `window::frames()`），其他页 250 ms。浮层的 200 ms 检查只在隐藏期限还在时订阅；胶囊的 16 ms 只在悬停延迟或宽度动画还没结束时订阅。首屏的逐帧订阅只到淡出结束。不播放、浮层已隐藏、遮罩已摘掉时没有定时器。
 - 界面文字：`crates/folia-i18n/locales/{en,zh-CN,in,vi}.toml`，键名与原版 `folia-major/src/i18n/locales/*.ts` 相同；zh-TW 构建时生成；缺键回退 zh-CN。没有原版之外的新增键。插值用 `I18n::format`（`{{name}}`，与 i18next 相同）。
 
 ## 开发与发布

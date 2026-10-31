@@ -11,6 +11,7 @@ mod player_bar;
 mod search;
 mod settings;
 mod settings_kit;
+mod splash;
 mod track_list;
 mod wall;
 
@@ -29,7 +30,7 @@ use folia_omni::Omni;
 use folia_store::{AppearanceSettings, FrameRate, GeneralSettings, PlaybackSettings, Store, ThemeMode};
 use folia_visualizer::{Scene, Style};
 use iced::widget::{button, column, container, mouse_area, row, rule, space, stack};
-use iced::{Alignment, Color, Element, Length, Size, Subscription, Task};
+use iced::{Alignment, Color, Element, Length, Size, Subscription, Task, mouse};
 use lucide_static_svg::Icon;
 
 use crate::background::save;
@@ -84,6 +85,7 @@ pub enum Message {
     CapsuleInside(bool),
     CapsuleFrame,
     ToggleFullscreen,
+    SplashFrame,
 }
 
 /// Settings id of the random lyric style choice, as in the original app.
@@ -118,6 +120,7 @@ pub struct Shell {
     /// Press on the drag strip, and the pointer position of the first move after it.
     drag_armed: bool,
     drag_from: Option<(f32, f32)>,
+    splash: splash::Splash,
 }
 
 impl Shell {
@@ -153,6 +156,7 @@ impl Shell {
             pointer_held: false,
             drag_armed: false,
             drag_from: None,
+            splash: splash::Splash::new(),
         };
         let open = if init.open_files.is_empty() { Task::none() } else { open_files(init.open_files) };
         let window = iced::window::oldest().map(Message::WindowReady);
@@ -209,6 +213,9 @@ impl Shell {
                 save(&self.store, &self.appearance)
             }
             Message::Library(message) => {
+                if matches!(message, library::Message::Loaded(_)) {
+                    self.splash.library_ready();
+                }
                 let (task, play) = self.library.update(message);
                 let task = task.map(Message::Library);
                 match play {
@@ -288,6 +295,10 @@ impl Shell {
                 Task::none()
             }
             Message::ToggleFullscreen => self.toggle_fullscreen(),
+            Message::SplashFrame => {
+                self.splash.on_frame(std::time::Instant::now());
+                Task::none()
+            }
             Message::Chrome(message) => self.chrome(message),
         }
     }
@@ -475,6 +486,30 @@ impl Shell {
             frame = frame.push(window.view(&self.i18n, &self.theme, daylight, self.window_size, values));
         }
         frame = frame.push(chrome::resize_frame().map(Message::Chrome)).push(chrome::activity().map(Message::Chrome));
+        let now = std::time::Instant::now();
+        if self.splash.showing(now) {
+            // A canvas for the plain cover keeps a GPU allocation after the splash is gone.
+            if self.splash.word(now) > 0.004 {
+                frame =
+                    frame.push(iced::widget::canvas(self.splash.program(now)).width(Length::Fill).height(Length::Fill));
+            } else {
+                let color = self.splash.cover_color(now);
+                let shade: Element<'_, Message> = container(space())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(color.into()),
+                        ..iced::widget::container::Style::default()
+                    })
+                    .into();
+                let layer = if self.splash.blocks_pointer() {
+                    mouse_area(shade).interaction(mouse::Interaction::Idle).into()
+                } else {
+                    shade
+                };
+                frame = frame.push(layer);
+            }
+        }
         frame.width(Length::Fill).height(Length::Fill).into()
     }
 
@@ -529,6 +564,9 @@ impl Shell {
             if window.animating() {
                 parts.push(iced::window::frames().map(|_| Message::Settings(settings::Message::Frame)));
             }
+        }
+        if self.splash.showing(std::time::Instant::now()) {
+            parts.push(iced::window::frames().map(|_| Message::SplashFrame));
         }
         if self.playback.is_playing() {
             let tick = |_| Message::Playback(playback::Message::Tick);
