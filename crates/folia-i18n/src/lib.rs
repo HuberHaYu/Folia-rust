@@ -44,6 +44,11 @@ impl I18n {
     pub fn t<'a>(&'a self, key: &'a str) -> &'a str {
         self.strings.get(key).or_else(|| self.fallback.get(key)).map_or(key, String::as_str)
     }
+
+    /// Like [`I18n::t`], with every `{{name}}` replaced by its value, as i18next interpolates.
+    pub fn format(&self, key: &str, args: &[(&str, &str)]) -> String {
+        args.iter().fold(self.t(key).to_owned(), |text, (name, value)| text.replace(&format!("{{{{{name}}}}}"), value))
+    }
 }
 
 /// Parses a locale and flattens nested tables into dotted keys.

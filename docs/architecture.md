@@ -7,7 +7,7 @@
 | crate | 职责 | 依赖 |
 |---|---|---|
 | `folia-app` | 二进制 `folia`：日志、目录、读设置、解析语言、命令行文件，启动 iced | ui、store、i18n |
-| `folia-ui` | `Shell`（页面、导航、订阅）、音乐库页、搜索页、正在播放页、设置页、播放栏、无边框窗口控件 | render、visualizer、player、omni、library、lyrics、store、i18n、core |
+| `folia-ui` | `Shell`（页面、导航、订阅）、首页封面墙、搜索页、正在播放页、设置窗口、播放栏、无边框窗口控件 | render、visualizer、player、omni、library、lyrics、store、i18n、core |
 | `folia-render` | 全屏 WGSL 通道（画在当前渲染通道上）：正在播放页的暗角、整数帧颗粒、字幕区主题色径向渐变；首页墙面的底色光晕（`Wash`）与暗角颗粒（`Veil`） | iced、wgpu |
 | `folia-visualizer` | 歌词动画样式（`Style` 注册表、`Scene` canvas 程序、动画曲线） | lyrics、core、iced |
 | `folia-omni` | 在线音乐门面 `Omni` 与各平台 `Provider`（目前网易云），在线音频下载缓存 | lyrics、core |
@@ -99,7 +99,7 @@
 - 无边框：`decorations: false`，最小 350×100。Windows 上 `undecorated_shadow: true`（保留阴影和贴边分屏用的厚边框）、`corner_preference: Round`。亚克力背景默认关，与原版 `enable_player_page_native_blur` 默认 false 一致，尚未做开关。
 - 四边 6px、四角 14px 为缩放热区，调用 `drag_resize`，光标分别是垂直、水平、两条对角线。顶上 32px 空白在指针移动超过 4px 后才 `drag`，避免按下立刻进入系统移动循环、把双击吃掉；双击这条空白切换最大化。右上角四个按钮各 44×32，从左到右：全屏（`Maximize` / `Minimize`，13px）、最小化、最大化/还原（方框 / Copy）、关闭（悬停变红）。F11 切换全屏（`window::Mode::Fullscreen` / `Windowed`），忽略按键重复。导航右侧留白 192px，给这四个按钮让位。贴边分屏后窗口尺寸变化会再问一次 `is_maximized`，用来同步还原图标。
 - 正在播放页歌词铺满窗口。导航、窗口按钮、底部胶囊的显隐由 `ChromeClock` 决定：只有指针坐标和上次记录的不同才把期限延长 3 秒（布局变化会把同一个坐标再送一次，不能据此重新显示）；滚轮、按下指针、进入正在播放页延长 3 秒；指针离开窗口 300ms 后隐藏（同 `usePlayerChromeAutoHide` 的 3000 / 300）。按住指针时不隐藏。期限用 `ChromeTick` 每 200ms 检查，只在 `until_ms` 还有值时订阅。窗口 id 在启动时用 `iced::window::oldest()` 取一次，取不到时下一次用到再取。其他页面这些条保持常显。导航画在拖动条之上，避免标签被拖动热区吃掉。
-- 左上角返回是 40×40 圆按钮（`ChevronLeft` 20px，`bg-black/20`，图标白 60%，距顶距左各 24px），只在指针进入左上 120×120 热区时出现，与原版 `VisualizerShell` 的 `PLAYER_CHROME_HOTSPOT_SIZE` 相同。右下角设置是 48×48（`Settings2` 20px，暗色 `bg-black/40`、日光 `bg-white/70`，右边 32px、底边 32px），跟胶囊一起隐藏。它打开设置页；原版这颗按钮打开的是播放器面板，面板还没移植。
+- 左上角返回是 40×40 圆按钮（`ChevronLeft` 20px，`bg-black/20`，图标白 60%，距顶距左各 24px），只在指针进入左上 120×120 热区时出现，与原版 `VisualizerShell` 的 `PLAYER_CHROME_HOTSPOT_SIZE` 相同。右下角设置是 48×48（`Settings2` 20px，暗色 `bg-black/40`、日光 `bg-white/70`，右边 32px、底边 32px），跟胶囊一起隐藏。它打开设置窗口；原版这颗按钮打开的是播放器面板，面板还没移植。
 - 底部胶囊最宽 512px（`32rem`），宽为 `clamp(窗口宽 - 32, 280, 512)`，窗口宽 ≥768 时收起为 60%，否则 80%。底边 32px（`bottom-8`），圆角 28。播放中默认收起，只留进度（时间加滑条，`px-4 py-2`）；悬停 20ms 后展开，移出 100ms 后收起；有曲目且不在播放时保持展开（同 `FloatingPlayerControls` 的 `showExpanded`）。宽度在 260ms 内线性走完再套 cubic ease-out `1-(1-t)^3`。展开后暗色填充黑 40%、白边 5%，日光填充白 60%、白边 20%；收起时填充降到黑 20% 或白 40%。上排是标题和按钮，下排是进度条。
 - 底部字幕同时放当前行译文和下一句可读文本（跳过 `......` 这类没有字母数字的行）。译文 `clamp(18px, 2.6vw, 20px)` 乘字号比例，透明度 0.6。下一句排在译文下面时字号为译文的 0.88、透明度为 0.6×0.82、间距 0.25em（`SECONDARY_TRACK_*`）；没有译文时用 `clamp(14px, 2vw, 16px)`、透明度 0.6。左右边距 16px。控制条在时底边 112px（基线 32 + 净空 80），隐藏后 32px。静止样式不重复画。每行底下有一层下移 1px、透明度 0.24×行透明度的主题背景色，近似 `text-shadow: 0 1px 2px`。字幕底在 `atmosphere.wgsl` 里直接画：文字框宽度用 `folia_visualizer::measure`（字号与该行相同，`Font::DEFAULT`，字重 Normal，上限 896px）。椭圆为这个文字框（加 `px-1.5 py-0.5` 和 `-inset-x-10 -inset-y-6`）的 115% × 130%，颜色是 `theme.background`，色标 alpha 在中心 0.96、62% 处 0.78、边缘 0，再把外沿平滑延出 40px 近似 `blur-2xl`。整块再乘字幕区透明度 0.6，叠在暗角之上。暗角强度 0.28，颗粒 0.04。颗粒的哈希是 u32 xorshift，帧号为 `time * 48` 对 4096 取模。没有远程控制按钮和点击穿透。亚克力仍默认关。
 - 与原版的差异：暗底的 40px 模糊是把椭圆外沿的色标过渡加宽，不是对渐变做高斯卷积。下一句没有 `blur(1px)` 的字形模糊。文字阴影没有 2px 模糊半径，只有下移 1px 的纯色副本。椭圆宽度用 iced 测量，字体是界面默认的 `Font::DEFAULT`，不是原版译文那套字体栈。原版胶囊内容切换是 layout spring（stiffness 280、damping 24），整条隐藏才是 0.26s ease-out；这里用这 260ms 来改宽度。原版默认字幕布局只有译文，下一句是布局选项；这里固定为译文加下一句。没有和原版并排截图（原版播放器在运行，没有关它，也没有改它的设置）。
@@ -117,14 +117,18 @@
 
 ## 界面
 
-- 页面：首页（`library.rs` + `wall.rs`，原版 Bravais 封面墙）、搜索（`search.rs`，用 `track_list.rs`，只构建视口内的行）；正在播放（`now_playing.rs`）、设置（`settings.rs`）；底部播放栏（`player_bar.rs`）。
+- 页面：首页（`library.rs` + `wall.rs`，原版 Bravais 封面墙）、搜索（`search.rs`，用 `track_list.rs`，只构建视口内的行）；正在播放（`now_playing.rs`）；底部播放栏（`player_bar.rs`）。设置不是页面，是盖在任何页面上的窗口（`settings.rs` + `settings_kit.rs`）。
+- 非播放页的顶栏就是标题栏：`chrome::drag_area` 包住导航行，空白处拖动窗口、双击最大化，标签照常点击；正在播放页用同一函数生成的顶部拖动条。导航行右端留 192px 给窗口按钮（`WINDOW_BUTTONS`），“选项”不再被最大化按钮盖住。
+- 设置窗口照原版 `SettingsModal` 与 `kit/`：遮罩黑 50%（日间 32%），窗口 960px 宽（不超过窗口宽减 40）、高 86%，圆角 16、1px `line2` 描边、`0 36px 90px` 50% 黑阴影，打开/关闭 0.24s easeOut，透明度 0→1、上移 20px（iced 不能整棵子树变透明，`Tokens::faded` 把所有颜色乘上透明度）。左侧 212px 分组列表（搜索框、分组名 12px、条目 32px 高 13px 字 16px 图标，当前项 `fill2`），右侧标题 20px Semibold、关闭按钮 32px、多组页面有标签条（13px、间距 22、2px 强调色下划线滑动 0.22s），内容区左右 32px、底部 64px。小于 768px 时列表变成顶部横条（无图标），边距减半。颜色取 `settingsTokens`：表面色按明暗固定，文字与填充是主题文字色的 62/42/8/16/7/12/17% 透明度，强调色是主题 `accent`，强调色上的字按 WCAG 对比度在 `#17171a` 与白之间选。控件：行（最小 56px、左右 16px、子行左缩进 40、上方发丝线）、卡片（圆角 12、1px `line`）、开关（40×24，拇指 18px，0.22s 滑动）、分段选择（高 32、内边距 2、选中块 `raise` 带阴影并滑动）、下拉（iced `pick_list`：32px 高、`fill` 底、菜单 `#2b2b30`/白、圆角 10、`0 14px 36px` 阴影）。Esc 先清空搜索再关闭，下拉菜单开着时 Esc 只关菜单。
+- 设置页面只放 Folia-rust 已有的功能：外观（歌词动画样式、明暗模式）、通用（界面语言，跟随系统时提示当前生效语言）、性能与动效（帧率限制开关，打开后子行选 30/45/60/90/120，开关打开默认 120，与原版 `FRAME_RATE_WHEN_SWITCHED_ON` 相同；关闭即跟随显示器）。搜索在分类名、组名、选项名里做不区分大小写的子串匹配，结果行右侧显示“分类 › 组”，点击跳到该分类并滚到该组。
+- 设置窗口与原版的差异：没有帮助页和其余 9 个分类；歌词动画行原版是打开动画工作台的链接，这里直接是下拉；明暗模式没有“跟随系统”；搜索没有命令面板的同义词与拼音；下拉菜单与触发器同宽、从左边缘垂下，选中项没有对勾；“i”展开说明、条目悬停的 tooltip、焦点环、拇指按下变宽、子行展开动画都没有；标签条跟随滚动按估算的组高度判断。
 - 首页封面墙：格子 128px、间距 8px，12×8 格的块，4 个模板 × 4 种镜像（`mixBlockCoords` 用 32 位乘法照搬），槽位按 `|dx| + |dy|·0.9 − √面积·136·0.35` 排序后依次放曲目；整体缩放 <640px 0.52、<1100px 0.64、其余 0.76。层次自下而上：`Wash`（底色 + 左上 accent 16%、右下 secondary 20% 两团光晕）、墙面 canvas、`Veil`（暗角 52%/日间 16%，静态颗粒）、右上工具按钮。磁贴：底色为背景混 12%（日间 6%）文字色，封面按 `object-fit: cover` 在解码时裁成磁贴比例（`folia_library::cover_for`，只缩不放），自上而下 5%→5%(34%)→24%(56%)→92% 的黑（日间白）渐变，左上 14px 编号角标，左下 17px 标题（`clamp(22px, 2vw, 36px)`，行高 0.96，最多 3 行）与歌手（13px，单行），正在播放加 2px accent 描边。
 - 墙面性能：canvas 自己发 `Viewport` 消息上报尺寸；标题断行与省略只在磁贴进入视口或字号变化时测一次（`Label` 缓存），封面只解码视口内磁贴，最多保留 120 张（LRU）。绘制全部用窗口坐标：iced 0.14 的 `Frame::with_clip` 不会把图片和文字平移进裁剪区。
 - 首页与原版的差异：没有原版的块底板与空画框、正在播放大格子的进度条、悬停/聚焦动效、标题字距 −0.045em（iced 不支持字距）；颗粒是逐像素哈希的黑白点而非 soft-light 分形噪声；导航栏与播放栏仍是现有布局，原版首页是全屏墙面。
 - 主题：`folia_core::Theme::{MIDNIGHT, DAYLIGHT}` 为原版两套预设，`Shell` 由它生成 iced 调色板。
 - 图标：`lucide-static-svg` 的 `Icon`，经 `icons::icon` / `icon_button` 着色绘制。
 - 重绘：播放定时器只在播放中订阅。正在播放页按帧率上限（`FrameRate::Display` 用 `window::frames()`），其他页 250 ms。浮层的 200 ms 检查只在隐藏期限还在时订阅；胶囊的 16 ms 只在悬停延迟或宽度动画还没结束时订阅。不播放且浮层已隐藏时没有定时器。
-- 界面文字：`crates/folia-i18n/locales/{en,zh-CN,in,vi}.toml`，键名与原版 `folia-major/src/i18n/locales/*.ts` 相同；zh-TW 构建时生成；缺键回退 zh-CN。只有 `options.frameRateDisplay` 是新增键（原版无对应文案）。
+- 界面文字：`crates/folia-i18n/locales/{en,zh-CN,in,vi}.toml`，键名与原版 `folia-major/src/i18n/locales/*.ts` 相同；zh-TW 构建时生成；缺键回退 zh-CN。没有原版之外的新增键。插值用 `I18n::format`（`{{name}}`，与 i18next 相同）。
 
 ## 开发与发布
 

@@ -75,13 +75,19 @@ pub fn resize_frame<'a>() -> Element<'a, Message> {
 
 /// The top strip that drags the window. A double click toggles maximize, like a title bar.
 pub fn drag_strip<'a>() -> Element<'a, Message> {
-    let strip = mouse_area(space().width(Length::Fill).height(Length::Fill))
-        .on_press(Message::DragArm)
-        .on_move(|point| Message::DragMove { x: point.x, y: point.y })
-        .on_release(Message::DragEnd)
-        .on_double_click(Message::ToggleMaximize)
-        .interaction(iced::mouse::Interaction::Grab);
+    let strip = drag_area(space().width(Length::Fill).height(Length::Fill).into(), |message| message);
     container(strip).width(Length::Fill).height(Length::Fixed(BAR)).align_y(Alignment::Start).into()
+}
+
+/// `content` that drags the window wherever none of its own controls takes the press.
+pub fn drag_area<'a, M: Clone + 'a>(content: Element<'a, M>, wrap: fn(Message) -> M) -> Element<'a, M> {
+    mouse_area(content)
+        .on_press(wrap(Message::DragArm))
+        .on_move(move |point| wrap(Message::DragMove { x: point.x, y: point.y }))
+        .on_release(wrap(Message::DragEnd))
+        .on_double_click(wrap(Message::ToggleMaximize))
+        .interaction(iced::mouse::Interaction::Grab)
+        .into()
 }
 
 /// Fullscreen, minimize, maximize or restore, and close. Each hit target is 44×32.

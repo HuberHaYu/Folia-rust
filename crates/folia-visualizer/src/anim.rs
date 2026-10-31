@@ -9,7 +9,7 @@ impl Ease {
     pub const OUT: Ease = Ease(0.0, 0.0, 0.58, 1.0);
     pub const IN_OUT: Ease = Ease(0.42, 0.0, 0.58, 1.0);
 
-    pub(crate) const fn new(x1: f64, y1: f64, x2: f64, y2: f64) -> Ease {
+    pub const fn new(x1: f64, y1: f64, x2: f64, y2: f64) -> Ease {
         Ease(x1, y1, x2, y2)
     }
 

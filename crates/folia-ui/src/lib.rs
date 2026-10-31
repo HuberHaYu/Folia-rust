@@ -10,6 +10,7 @@ mod playback;
 mod player_bar;
 mod search;
 mod settings;
+mod settings_kit;
 mod track_list;
 mod wall;
 
@@ -57,12 +58,13 @@ pub enum Page {
     Library,
     Search,
     NowPlaying,
-    Settings,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Navigate(Page),
+    OpenSettings,
+    Settings(settings::Message),
     LanguagePicked(LanguagePreference),
     Theme(ThemeMode),
     FrameRate(FrameRate),
@@ -96,6 +98,7 @@ pub struct Shell {
     theme: Theme,
     iced_theme: iced::Theme,
     page: Page,
+    settings: Option<settings::Settings>,
     library: LibraryPage,
     search: SearchPage,
     omni: Option<Omni>,
@@ -133,6 +136,7 @@ impl Shell {
             i18n: init.i18n,
             system_locale: init.system_locale,
             page: Page::Library,
+            settings: None,
             library,
             search: SearchPage::default(),
             playback: Playback::new(init.playback, omni.clone()),
@@ -175,16 +179,30 @@ impl Shell {
                 }
                 Task::none()
             }
+            Message::OpenSettings => {
+                self.settings = Some(settings::Settings::open());
+                Task::none()
+            }
+            Message::Settings(message) => {
+                let Some(window) = self.settings.as_mut() else { return Task::none() };
+                let task = window.update(message).map(Message::Settings);
+                if window.finished() {
+                    self.settings = None;
+                }
+                task
+            }
             Message::LanguagePicked(preference) => self.set_language(preference),
             Message::Theme(mode) => {
+                let before = self.appearance.clone();
                 self.appearance.theme = mode;
                 self.theme = mode.theme();
                 self.iced_theme = iced_theme(&self.theme);
-                save(&self.store, &self.appearance)
+                self.appearance_changed(&before)
             }
             Message::FrameRate(rate) => {
+                let before = self.appearance.clone();
                 self.appearance.frame_rate = rate;
-                save(&self.store, &self.appearance)
+                self.appearance_changed(&before)
             }
             Message::Visualizer(style) => {
                 self.appearance.visualizer = style.map_or(RANDOM_STYLE, Style::id).to_owned();
@@ -373,24 +391,15 @@ impl Shell {
                 let background = folia_visualizer::color(self.theme.background, 1.0);
                 now_playing::view(scene, &self.i18n, muted, background, self.window_size, subtitle, bottom)
             }
-            Page::Settings => {
-                settings::view(&self.i18n, self.general.language, &self.appearance, self.chosen_style(), muted)
-            }
         };
         let playing = self.page == Page::NowPlaying;
         let mut frame: iced::widget::Stack<'_, Message, iced::Theme, iced::Renderer> = if playing {
             stack![page, chrome::drag_strip().map(Message::Chrome)]
         } else {
             let bar = player_bar::view(&self.playback, &self.i18n, text_color, muted).map(Message::Playback);
-            stack![
-                column![
-                    self.navigation(text_color, muted),
-                    container(page).height(Length::Fill),
-                    rule::horizontal(1),
-                    bar
-                ],
-                chrome::drag_strip().map(Message::Chrome),
-            ]
+            // The tab row is the title bar here: its empty space drags the window, its tabs still take clicks.
+            let header = chrome::drag_area(self.navigation(text_color, muted), Message::Chrome);
+            stack![column![header, container(page).height(Length::Fill), rule::horizontal(1), bar]]
         };
         if playing && self.back_hotspot() {
             let back = chrome::round_button(
@@ -435,7 +444,7 @@ impl Shell {
                 settings_fill,
                 settings_icon,
                 self.i18n.t("ui.options"),
-                Message::Navigate(Page::Settings),
+                Message::OpenSettings,
             );
             frame = frame.push(floating).push(pin(
                 settings,
@@ -443,13 +452,8 @@ impl Shell {
                 Alignment::End,
                 iced::Padding { top: 0.0, right: 32.0, bottom: CAPSULE_BOTTOM, left: 0.0 },
             ));
-            // Above the drag strip, so the tabs receive clicks. The right inset clears the window buttons.
-            frame = frame.push(container(self.navigation(text_color, muted)).padding(iced::Padding {
-                top: 0.0,
-                right: 192.0,
-                bottom: 0.0,
-                left: 0.0,
-            }));
+            // Above the drag strip, so the tabs receive clicks.
+            frame = frame.push(self.navigation(text_color, muted));
         }
         if !playing || self.chrome_visible() {
             let controls = container(
@@ -460,6 +464,15 @@ impl Shell {
             .align_x(Alignment::End)
             .align_y(Alignment::Start);
             frame = frame.push(controls);
+        }
+        if let Some(window) = &self.settings {
+            let values = settings::Values {
+                language: self.general.language,
+                resolved: self.i18n.language(),
+                appearance: &self.appearance,
+                style: self.chosen_style(),
+            };
+            frame = frame.push(window.view(&self.i18n, &self.theme, daylight, self.window_size, values));
         }
         frame = frame.push(chrome::resize_frame().map(Message::Chrome)).push(chrome::activity().map(Message::Chrome));
         frame.width(Length::Fill).height(Length::Fill).into()
@@ -511,6 +524,12 @@ impl Shell {
             }
             parts.push(iced::event::listen_with(chrome_pointer));
         }
+        if let Some(window) = &self.settings {
+            parts.push(iced::event::listen_with(settings_key));
+            if window.animating() {
+                parts.push(iced::window::frames().map(|_| Message::Settings(settings::Message::Frame)));
+            }
+        }
         if self.playback.is_playing() {
             let tick = |_| Message::Playback(playback::Message::Tick);
             let playback = if self.page != Page::NowPlaying {
@@ -546,6 +565,18 @@ impl Shell {
     }
 
     fn navigation(&self, text_color: Color, muted: Color) -> Element<'_, Message> {
+        let options_color = if self.settings.is_some() { text_color } else { muted };
+        let options = button(
+            row![
+                icons::icon(Icon::Settings, 16.0, options_color),
+                iced::widget::text(self.i18n.t("ui.options").to_owned()).color(options_color)
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .style(button::text)
+        .padding([6, 12])
+        .on_press(Message::OpenSettings);
         let tab = |page: Page, lucide: Icon, key: &str| {
             let color = if self.page == page { text_color } else { muted };
             let label =
@@ -559,11 +590,19 @@ impl Shell {
             tab(Page::Search, Icon::Search, "libraryBravaisHome.search"),
             tab(Page::NowPlaying, Icon::AudioLines, "ui.visualizer"),
             space().width(Length::Fill),
-            tab(Page::Settings, Icon::Settings, "ui.options"),
+            options,
         ]
-        .padding([6, 12])
+        .padding(iced::Padding { top: 6.0, right: 12.0 + WINDOW_BUTTONS, bottom: 6.0, left: 12.0 })
         .align_y(Alignment::Center)
         .into()
+    }
+
+    /// Saves the appearance and lets an open settings window glide the marks the change moved.
+    fn appearance_changed(&mut self, before: &AppearanceSettings) -> Task<Message> {
+        if let Some(window) = self.settings.as_mut() {
+            window.changed(before, &self.appearance);
+        }
+        save(&self.store, &self.appearance)
     }
 
     fn set_language(&mut self, preference: LanguagePreference) -> Task<Message> {
@@ -586,6 +625,8 @@ fn open_files(paths: Vec<PathBuf>) -> Task<Message> {
     Task::perform(work, |tracks| Message::OpenFiles(tracks.unwrap_or_default()))
 }
 
+/// Room the tab row leaves at its right end for the window buttons drawn over it.
+const WINDOW_BUTTONS: f32 = 192.0;
 /// Top-left square that reveals the back button, from `PLAYER_CHROME_HOTSPOT_SIZE`.
 const HOTSPOT: f32 = 120.0;
 /// Subtitle `bottom` while the capsule is on screen: baseline 32 plus 80px of clearance.
@@ -607,6 +648,20 @@ fn fullscreen_key(event: iced::Event, _status: iced::event::Status, _id: iced::w
             repeat: false,
             ..
         }) => Some(Message::ToggleFullscreen),
+        _ => None,
+    }
+}
+
+/// Escape clears the settings search, or closes the window when there is none; an open list takes it first.
+fn settings_key(event: iced::Event, status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    if status == iced::event::Status::Captured {
+        return None;
+    }
+    match event {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            ..
+        }) => Some(Message::Settings(settings::Message::Escape)),
         _ => None,
     }
 }
