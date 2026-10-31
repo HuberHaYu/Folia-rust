@@ -65,7 +65,27 @@
 - `folia_visualizer::Scene { style, lyrics, time, theme, font_scale }` 实现 `canvas::Program`，背景色 + 按 `style` 分派到 `styles::<style>::draw`。
 - 每一帧是播放时间的纯函数：词的状态切换时刻由歌词时间算出，弹簧用解析解、tween 用 CSS cubic-bezier（`anim.rs`），没有逐帧状态；暂停即冻结、跳转即正确。
 - 需要测文字的布局按行缓存在 `SceneState` 的 `LayoutCache` 里（按行开始时间、画布尺寸、字号比例取键，最多 4 行）。
-- 已有样式：`classic`（流光，逐帧动画）、`partita`（云阶，分行错位 + 角标引导线）、`still`（静止，三行静态歌词，几何用 iced `Cache` 缓存，只在行变化或尺寸变化时重画，帧率上限 10）、`tilt`（倾诉，一行拆成 1–4 行，其中一行斜体上下错落，按字脉冲）。
+- 已有样式：`classic`（流光）、`partita`（云阶）、`still`（静止，帧率上限 10）、`tilt`（倾诉）、`claddagh`（回环，字素排在倾斜椭圆上）、`cadenza`（心象，当前行的词散在一个更大的焦点词周围）。
+- 尚未移植的样式按原版非空行数从小到大。行数是 `src/components/visualizer/<id>/` 里 `.ts`/`.tsx`/`.css` 的非空行。着色器指 GLSL、WebGL、Pixi、three.js 或 Paper shader；Canvas 2D 不算。
+
+| 行数 | id | 显示名 | i18n 键 | 着色器 |
+|---|---|---|---|---|
+| 1152 | `claddagh` | 回环 | `ui.visualizerCladdagh` | 否。DOM 变换和 CSS drop-shadow |
+| 2013 | `cappella` | 群唱 | `ui.visualizerCappella` | 否。自带头像和表情图 |
+| 3776 | `monet` | 莫奈 | `ui.visualizerMonet` | 否。Canvas 2D |
+| 3967 | `nebbia` | 雾笺 | `ui.visualizerNebbia` | 是。自带 GLSL。`entry` 里 `background: false` |
+| 4086 | `fume` | 浮名 | `ui.visualizerFume` | 否。Canvas 2D。`entry` 会改 common 背景 |
+| 5052 | `pendolo` | 时计 | `ui.visualizerPendolo` | 是。机芯用 WebGL |
+| 6570 | `diorama` | 镜台 | `ui.visualizerDiorama` | 是。three.js 和粒子着色器 |
+| 9869 | `lumiere` | 绘光 | `ui.visualizerLumiere` | 是。Pixi |
+| 10808 | `sonnet` | 商籁 | `ui.visualizerSonnet` | 是。Pixi |
+| 11725 | `tempera` | 凝彩 | `ui.visualizerTempera` | 是。Pixi |
+| 12336 | `hanabi` | 花火 | `ui.visualizerHanabi` | 是。Pixi |
+| 12815 | `machi` | 町景 | `ui.visualizerMachi` | 是。自带场景着色器。`entry` 里 `background: false` |
+
+- 背景（`visualizer/backgrounds/`，同样按非空行）：`sora` 320 行，着色器星空；`url` 355 行，嵌入页面，不自带着色器；`latent` 729 行，Paper 着色器；`monet` 883 行，Canvas 2D 封面；`nomand` 983 行，Paper 着色器；`common` 1106 行，CSS 几何和封面柔焦，不自带着色器。只有浮名在 entry 里改背景，所以 `common` 放在浮名之前。星空、隐现、漫游没有样式写死要它们。雾笺、町景、静止关掉背景。
+- 心象（cadenza）与原版的差异：字素用 Rust `char`，不是 `Intl.Segmenter`。折行用 `measure` 贪心，优先在空白断开，不是 pretext，也没有 pretext 的字距。缩放、转角、透明度按原版指数速率 11 和 14，从这一行出现和词状态切换的时刻解析计算；发光包络、正文混色和唱完漂移直接取原版曲线。节拍能量固定为 0，所以每个词的正弦浮动为 0，整云仍有 `sin(time × 2.3) × 3` 像素的上下浮动。没有 CSS `blur()` 和 40px `text-shadow`，发光是放大 1.08 的半透明强调色；普通揭示下的非中日韩多字词按字素分别发光。没有逐词配色，强调色用主题 `accent`。没有 `isChorus`，不画副歌波纹。`beamIntensity` 固定 0。调节项用默认值（`fontScale` 1.12、`widthRatio` 0.72、`motionAmount` 1、`glowIntensity` 1），设置面板未做。不画「等待音乐」。底部字幕仍走共用叠层。只画渲染窗口里的当前行。行的进入、退出和停顿时长来自 `RenderHints::phases`。
+- 回环（claddagh）与原版的差异：字素用 Rust `char`，不是 `Intl.Segmenter`。字宽用 `measure`（Bold 72px），再加原版 0.04em 字距和 0.18em 字距。换行弹簧是 `anim::spring`，刚度 55/0.9、阻尼 14/0.9。每一行从上一段在换行时刻已经转到的角度接着转，短于收敛时间的行不会跳回上一行的目标角；中心行序号一次跳过超过 1 行时直接到目标角。原版拖动进度拿上一帧的序号比较，这里一帧只由播放时间决定，按顺序开始的歌词在拖动后显示连续播到该时刻的角度。第一行之前原版中心序号是 -1，进入第 0 行会从 -π 转过来；第 0 行保持 0。有行开始之后，中心行就是最后一个已开始的行。节拍能量固定为 0（还没有频段），中轴线不随低音伸缩，副歌错位不出现。没有 `isChorus`。远处字的 `blur()` 和多层 `text-shadow` 没画，只保留透明度、缩放、切线转角和唱到后的强调色。调节项用默认值（`focusScaleRatio` 0.65、`radiusScale` 1、`ellipseTiltDeg` 45、显示中轴线、`letterSpacingOffset` 0），设置面板未做。
 - 新增样式：建 `src/styles/<id>/`（或单文件 `<id>.rs`），在 `registry.rs` 的 `Style` 加一项（id 同原版、显示名 i18n 键、`max_fps`），在 `lib.rs` 的 `draw` 分派里加一行，在 `SceneState` 加该样式的缓存字段（如需要）。目前两个样式只在 `draw` 一处分派，尚不需要 trait。
 - `random`：每首歌用 `Style::random_for(track.id)` 稳定地抽一个样式（随机池为全部样式，暂不可编辑）。
 - 正在播放页的重绘频率 = min(设置的帧率上限, 样式的 `max_fps`)；两者都不限时用 `window::frames()`。
@@ -125,5 +145,5 @@ cargo test --manifest-path test/Cargo.toml
 
 ## 当前状态与性能
 
-- 能扫描本地文件夹、播放、暂停、跳转、调音量、切换重复模式；搜索并播放网易云歌曲（含歌词）；显示流光/云阶/静止/倾诉四种歌词样式与翻译；切换语言、主题、歌词样式、帧率上限。
+- 能扫描本地文件夹、播放、暂停、跳转、调音量、切换重复模式；搜索并播放网易云歌曲（含歌词）；显示流光/云阶/静止/倾诉/回环/心象歌词样式与翻译；切换语言、主题、歌词样式、帧率上限。
 - release 构建（Windows，Intel Arc A580）：空闲 CPU 0%；正在播放页 60 FPS 动画时 CPU 0.16%（20 逻辑核折算）、GPU 3D 约 3.5%、工作集约 116 MB。

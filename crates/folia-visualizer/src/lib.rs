@@ -30,6 +30,8 @@ pub struct Scene<'a> {
 /// Per-widget state: measured line layouts survive between frames.
 #[derive(Default)]
 pub struct SceneState {
+    cadenza: RefCell<styles::cadenza::Cache>,
+    claddagh: RefCell<LayoutCache<styles::claddagh::LineLayout>>,
     classic: RefCell<LayoutCache<styles::classic::LineLayout>>,
     partita: RefCell<LayoutCache<styles::partita::PartitaLayout>>,
     tilt: RefCell<LayoutCache<styles::tilt::TiltLayout>>,
@@ -49,12 +51,14 @@ impl<Message> canvas::Program<Message> for Scene<'_> {
     ) -> Vec<Geometry> {
         let size = bounds.size();
         match self.style {
-            Style::Classic | Style::Partita | Style::Tilt => {
+            Style::Classic | Style::Partita | Style::Tilt | Style::Claddagh | Style::Cadenza => {
                 let mut frame = Frame::new(renderer, size);
                 frame.fill_rectangle(iced::Point::ORIGIN, size, color(self.theme.background, 1.0));
                 match self.style {
                     Style::Partita => styles::partita::draw(self, &mut state.partita.borrow_mut(), &mut frame, size),
                     Style::Tilt => styles::tilt::draw(self, &mut state.tilt.borrow_mut(), &mut frame, size),
+                    Style::Claddagh => styles::claddagh::draw(self, &mut state.claddagh.borrow_mut(), &mut frame, size),
+                    Style::Cadenza => styles::cadenza::draw(self, &mut state.cadenza.borrow_mut(), &mut frame, size),
                     _ => styles::classic::draw(self, &mut state.classic.borrow_mut(), &mut frame, size),
                 }
                 vec![frame.into_geometry()]

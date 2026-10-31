@@ -7,10 +7,13 @@ pub enum Style {
     Partita,
     Still,
     Tilt,
+    Claddagh,
+    Cadenza,
 }
 
 impl Style {
-    pub const ALL: [Style; 4] = [Style::Classic, Style::Partita, Style::Still, Style::Tilt];
+    pub const ALL: [Style; 6] =
+        [Style::Classic, Style::Partita, Style::Still, Style::Tilt, Style::Claddagh, Style::Cadenza];
 
     /// Id used in settings files, the same as the original app's mode id.
     pub fn id(self) -> &'static str {
@@ -19,6 +22,8 @@ impl Style {
             Style::Partita => "partita",
             Style::Still => "still",
             Style::Tilt => "tilt",
+            Style::Claddagh => "claddagh",
+            Style::Cadenza => "cadenza",
         }
     }
 
@@ -39,13 +44,15 @@ impl Style {
             Style::Partita => "ui.visualizerPartita",
             Style::Still => "ui.visualizerStill",
             Style::Tilt => "ui.visualizerTilt",
+            Style::Claddagh => "ui.visualizerCladdagh",
+            Style::Cadenza => "ui.visualizerCadenze",
         }
     }
 
     /// The most frames per second the style can use; static styles only need to notice line changes.
     pub fn max_fps(self) -> Option<u32> {
         match self {
-            Style::Classic | Style::Partita | Style::Tilt => None,
+            Style::Classic | Style::Partita | Style::Tilt | Style::Claddagh | Style::Cadenza => None,
             Style::Still => Some(10),
         }
     }
