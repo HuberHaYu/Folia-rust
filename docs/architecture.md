@@ -8,17 +8,17 @@
 |---|---|---|
 | `folia-app` | 二进制 `folia`：日志、目录、读设置、解析语言、命令行文件，启动 iced | ui、store、i18n |
 | `folia-ui` | `Shell`（页面、导航、订阅）、音乐库页、搜索页、正在播放页、设置页、播放栏、无边框窗口控件 | render、visualizer、player、omni、library、lyrics、store、i18n、core |
-| `folia-render` | 全窗口后期：暗角、整数帧颗粒、字幕区主题色径向渐变（WGSL，画在当前渲染通道上） | iced、wgpu |
+| `folia-render` | 全屏 WGSL 通道（画在当前渲染通道上）：正在播放页的暗角、整数帧颗粒、字幕区主题色径向渐变；首页墙面的底色光晕（`Wash`）与暗角颗粒（`Veil`） | iced、wgpu |
 | `folia-visualizer` | 歌词动画样式（`Style` 注册表、`Scene` canvas 程序、动画曲线） | lyrics、core、iced |
 | `folia-omni` | 在线音乐门面 `Omni` 与各平台 `Provider`（目前网易云），在线音频下载缓存 | lyrics、core |
 | `folia-player` | 播放引擎：解码线程、重采样、无锁环形缓冲、cpal 输出 | 无 folia 依赖 |
-| `folia-library` | 本地音乐库：文件夹扫描、标签、SQLite 索引、旁挂/内嵌歌词 | lyrics、core |
+| `folia-library` | 本地音乐库：文件夹扫描、标签、SQLite 索引、旁挂/内嵌歌词、封面（`cover_for`） | lyrics、core |
 | `folia-lyrics` | 歌词格式识别与解析、翻译匹配、间奏行、渲染提示 | core |
 | `folia-store` | 设置持久化：`AppDirs`、`Store`、`Domain`、各领域设置 | core |
 | `folia-i18n` | 语言包加载与查找 | core |
 | `folia-core` | 共用类型：语言、歌词、曲目、主题、播放队列 | 无 |
 
-尚未创建的 crate（`folia-analysis`、`folia-mnn-sys`）见工作区 `AGENTS.md`。歌词样式仍用 iced canvas。`folia-render` 负责正在播放页的暗角、颗粒，以及字幕背后的主题色径向渐变。不采样交换链，也不修改 `iced_wgpu`。
+尚未创建的 crate（`folia-analysis`、`folia-mnn-sys`）见工作区 `AGENTS.md`。歌词样式仍用 iced canvas。`folia-render` 负责正在播放页的暗角、颗粒，以及字幕背后的主题色径向渐变，还有首页墙面的底色光晕与暗角颗粒。所有通道共用 `pipeline::Fullscreen`（一个全屏三角形 + 一个 uniform），共用的顶点着色器与像素哈希在 `shaders/fullscreen.wgsl`，由 `concat!` 拼到各着色器前。不采样交换链，也不修改 `iced_wgpu`。
 
 ## 启动流程
 
@@ -117,7 +117,10 @@
 
 ## 界面
 
-- 页面：音乐库（`library.rs`）、搜索（`search.rs`），两者共用 `track_list.rs`（只构建视口内的行）；正在播放（`now_playing.rs`）、设置（`settings.rs`）；底部播放栏（`player_bar.rs`）。
+- 页面：首页（`library.rs` + `wall.rs`，原版 Bravais 封面墙）、搜索（`search.rs`，用 `track_list.rs`，只构建视口内的行）；正在播放（`now_playing.rs`）、设置（`settings.rs`）；底部播放栏（`player_bar.rs`）。
+- 首页封面墙：格子 128px、间距 8px，12×8 格的块，4 个模板 × 4 种镜像（`mixBlockCoords` 用 32 位乘法照搬），槽位按 `|dx| + |dy|·0.9 − √面积·136·0.35` 排序后依次放曲目；整体缩放 <640px 0.52、<1100px 0.64、其余 0.76。层次自下而上：`Wash`（底色 + 左上 accent 16%、右下 secondary 20% 两团光晕）、墙面 canvas、`Veil`（暗角 52%/日间 16%，静态颗粒）、右上工具按钮。磁贴：底色为背景混 12%（日间 6%）文字色，封面按 `object-fit: cover` 在解码时裁成磁贴比例（`folia_library::cover_for`，只缩不放），自上而下 5%→5%(34%)→24%(56%)→92% 的黑（日间白）渐变，左上 14px 编号角标，左下 17px 标题（`clamp(22px, 2vw, 36px)`，行高 0.96，最多 3 行）与歌手（13px，单行），正在播放加 2px accent 描边。
+- 墙面性能：canvas 自己发 `Viewport` 消息上报尺寸；标题断行与省略只在磁贴进入视口或字号变化时测一次（`Label` 缓存），封面只解码视口内磁贴，最多保留 120 张（LRU）。绘制全部用窗口坐标：iced 0.14 的 `Frame::with_clip` 不会把图片和文字平移进裁剪区。
+- 首页与原版的差异：没有原版的块底板与空画框、正在播放大格子的进度条、悬停/聚焦动效、标题字距 −0.045em（iced 不支持字距）；颗粒是逐像素哈希的黑白点而非 soft-light 分形噪声；导航栏与播放栏仍是现有布局，原版首页是全屏墙面。
 - 主题：`folia_core::Theme::{MIDNIGHT, DAYLIGHT}` 为原版两套预设，`Shell` 由它生成 iced 调色板。
 - 图标：`lucide-static-svg` 的 `Icon`，经 `icons::icon` / `icon_button` 着色绘制。
 - 重绘：播放定时器只在播放中订阅。正在播放页按帧率上限（`FrameRate::Display` 用 `window::frames()`），其他页 250 ms。浮层的 200 ms 检查只在隐藏期限还在时订阅；胶囊的 16 ms 只在悬停延迟或宽度动画还没结束时订阅。不播放且浮层已隐藏时没有定时器。
@@ -145,5 +148,5 @@ cargo test --manifest-path test/Cargo.toml
 
 ## 当前状态与性能
 
-- 能扫描本地文件夹、播放、暂停、跳转、调音量、切换重复模式；搜索并播放网易云歌曲（含歌词）；显示流光/云阶/静止/倾诉/回环/心象歌词样式与翻译；切换语言、主题、歌词样式、帧率上限。
-- release 构建（Windows，Intel Arc A580）：空闲 CPU 0%；正在播放页 60 FPS 动画时 CPU 0.16%（20 逻辑核折算）、GPU 3D 约 3.5%、工作集约 116 MB。
+- 首页为原版 Bravais 封面墙，可拖动、滚轮平移、点击播放；能扫描本地文件夹、播放、暂停、跳转、调音量、切换重复模式；搜索并播放网易云歌曲（含歌词）；显示流光/云阶/静止/倾诉/回环/心象歌词样式与翻译；切换语言、主题、歌词样式、帧率上限。
+- release 构建（Windows，Intel Arc A580）：空闲 CPU 0%；正在播放页 60 FPS 动画时 CPU 0.16%（20 逻辑核折算）、GPU 3D 约 3.5%、工作集约 116 MB。首页封面墙（26 首）静止时 CPU 0%、GPU 0%，持续拖动时 CPU 0.06%、GPU 3D 3.7%，工作集约 130 MB、私有内存约 230 MB。

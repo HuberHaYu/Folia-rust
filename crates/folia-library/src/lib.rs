@@ -1,8 +1,10 @@
 // Local music library: watched folders, an incremental scan into SQLite, and lyric lookup.
 
+mod cover;
 mod lyrics;
 mod tags;
 
+pub use cover::{Cover, cover_for};
 pub use lyrics::{decode_text, lyrics_for};
 pub use tags::read as read_track;
 

@@ -10,6 +10,7 @@ license.workspace = true
 folia-core.workspace = true
 folia-lyrics.workspace = true
 encoding_rs.workspace = true
+image.workspace = true
 lofty.workspace = true
 rayon.workspace = true
 rusqlite.workspace = true

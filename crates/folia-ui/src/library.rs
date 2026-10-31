@@ -1,25 +1,25 @@
-// Library page: imports folders, rescans them in the background and lists every track.
+// Home page: the cover wall of every library track, with import and rescan floating over it.
 
 use std::path::PathBuf;
 
-use folia_core::Track;
+use folia_core::{Theme, Track};
 use folia_i18n::I18n;
 use folia_library::Library;
-use iced::widget::scrollable::Viewport;
-use iced::widget::{column, container, row, space, text};
+use folia_render::{Glow, Veil, Wash};
+use iced::widget::{canvas, container, row, shader, stack, text};
 use iced::{Alignment, Color, Element, Length, Task};
 use lucide_static_svg::Icon;
 
 use crate::background::{blocking, error_chain};
 use crate::icons::icon_button;
-use crate::track_list::TrackList;
+use crate::wall::{self, Wall};
 
 pub struct LibraryPage {
     db_path: PathBuf,
     pub tracks: Vec<Track>,
     busy: bool,
     error: Option<String>,
-    list: TrackList,
+    wall: Wall,
 }
 
 #[derive(Debug, Clone)]
@@ -28,15 +28,14 @@ pub enum Message {
     Picked(Option<PathBuf>),
     Reload,
     Loaded(Result<Vec<Track>, String>),
-    Scrolled(Viewport),
-    Play(usize),
+    Wall(wall::Message),
 }
 
 impl LibraryPage {
     /// Shows what the index already holds; scanning only happens on import or reload.
     pub fn new(db_path: PathBuf) -> (Self, Task<Message>) {
         let task = load(db_path.clone(), None, false);
-        let page = Self { db_path, tracks: Vec::new(), busy: true, error: None, list: TrackList::default() };
+        let page = Self { db_path, tracks: Vec::new(), busy: true, error: None, wall: Wall::default() };
         (page, task)
     }
 
@@ -57,16 +56,16 @@ impl LibraryPage {
                     Ok(tracks) => {
                         self.tracks = tracks;
                         self.error = None;
+                        return (self.wall.relayout(&self.tracks).map(Message::Wall), None);
                     }
                     Err(err) => self.error = Some(err),
                 }
                 (Task::none(), None)
             }
-            Message::Scrolled(viewport) => {
-                self.list.scrolled(viewport);
-                (Task::none(), None)
+            Message::Wall(message) => {
+                let (task, play) = self.wall.update(message, &self.tracks);
+                (task.map(Message::Wall), play)
             }
-            Message::Play(index) => (Task::none(), Some(index)),
         }
     }
 
@@ -81,15 +80,13 @@ impl LibraryPage {
     pub fn view<'a>(
         &'a self,
         i18n: &'a I18n,
+        theme: &'a Theme,
+        daylight: bool,
         text_color: Color,
         muted: Color,
         playing: Option<i64>,
     ) -> Element<'a, Message> {
-        let title = if self.busy { i18n.t("localMusic.importing") } else { i18n.t("localMusic.allSongs") };
-        let header = row![
-            text(title).size(24),
-            text(self.tracks.len().to_string()).size(14).color(muted),
-            space().width(Length::Fill),
+        let tools = row![
             icon_button(
                 Icon::RefreshCw,
                 18.0,
@@ -105,18 +102,44 @@ impl LibraryPage {
                 (!self.busy).then_some(Message::Import)
             ),
         ]
-        .spacing(12)
+        .spacing(4)
         .align_y(Alignment::Center);
+        let tools = container(tools).width(Length::Fill).align_x(Alignment::End).padding([56, 16]);
 
         let body: Element<'a, Message> = if let Some(error) = &self.error {
-            text(error).color(muted).into()
-        } else if self.tracks.is_empty() && !self.busy {
-            container(text(i18n.t("localMusic.noLocalMusic")).color(muted)).center(Length::Fill).into()
+            container(text(error).color(muted)).center(Length::Fill).into()
+        } else if self.tracks.is_empty() {
+            let note = if self.busy { i18n.t("localMusic.importing") } else { i18n.t("localMusic.noLocalMusic") };
+            container(text(note).color(muted)).center(Length::Fill).into()
         } else {
-            self.list.view(&self.tracks, i18n, muted, playing, Message::Scrolled, Message::Play)
+            let wall: Element<'a, wall::Message> = canvas(self.wall.view(&self.tracks, theme, daylight, playing))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+            wall.map(Message::Wall)
         };
-        column![header, body].spacing(16).padding(24).into()
+        stack![ground(theme), body, veil(daylight), tools].into()
     }
+}
+
+/// `wall.css`: the theme background lit by an accent glow top-left and a secondary glow bottom-right.
+fn ground<'a, M: 'a>(theme: &Theme) -> Element<'a, M> {
+    let srgb = |rgb: folia_core::Rgb| [rgb.r, rgb.g, rgb.b].map(|channel| f32::from(channel) / 255.0);
+    let glow = |rgb: folia_core::Rgb, alpha: f32, center: [f32; 2], reach: f32| {
+        let [r, g, b] = srgb(rgb);
+        Glow { center, reach, rgba: [r, g, b, alpha] }
+    };
+    let wash = Wash {
+        base: srgb(theme.background),
+        glows: [glow(theme.accent, 0.16, [0.14, 0.12], 0.29), glow(theme.secondary, 0.20, [0.86, 0.82], 0.32)],
+    };
+    shader(wash).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// The wall's edge vignette (52% black at the corners, 16% by day) and its grain, over the tiles.
+fn veil<'a, M: 'a>(daylight: bool) -> Element<'a, M> {
+    let veil = if daylight { Veil { vignette: 0.16, grain: 0.019 } } else { Veil { vignette: 0.52, grain: 0.035 } };
+    shader(veil).width(Length::Fill).height(Length::Fill).into()
 }
 
 fn load(db_path: PathBuf, folder: Option<PathBuf>, scan: bool) -> Task<Message> {

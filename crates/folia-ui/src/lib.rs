@@ -11,6 +11,7 @@ mod player_bar;
 mod search;
 mod settings;
 mod track_list;
+mod wall;
 
 pub use background::{error_chain, format_time};
 pub use overlay::{
@@ -348,10 +349,11 @@ impl Shell {
     pub fn view(&self) -> Element<'_, Message> {
         let (text_color, muted) =
             (folia_visualizer::color(self.theme.primary, 1.0), folia_visualizer::color(self.theme.secondary, 1.0));
+        let daylight = self.appearance.theme == ThemeMode::Light;
         let page: Element<'_, Message> = match self.page {
             Page::Library => {
                 let playing = self.playback.current().map(|track| track.id);
-                self.library.view(&self.i18n, text_color, muted, playing).map(Message::Library)
+                self.library.view(&self.i18n, &self.theme, daylight, text_color, muted, playing).map(Message::Library)
             }
             Page::Search => {
                 let playing = self.playback.current().map(|track| track.id);
@@ -376,7 +378,6 @@ impl Shell {
             }
         };
         let playing = self.page == Page::NowPlaying;
-        let daylight = self.appearance.theme == ThemeMode::Light;
         let mut frame: iced::widget::Stack<'_, Message, iced::Theme, iced::Renderer> = if playing {
             stack![page, chrome::drag_strip().map(Message::Chrome)]
         } else {

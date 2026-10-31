@@ -1,15 +1,20 @@
 // Full-window vignette, grain, and the subtitle radial glow.
 
 mod frame;
+mod pipeline;
+mod wash;
 
 pub use frame::grain_frame;
+pub use wash::{Glow, Veil, Wash};
+
+use pipeline::Fullscreen;
 
 use std::marker::PhantomData;
 
 use iced::widget::shader::{self, Primitive as ShaderPrimitive};
 use iced::{Rectangle, mouse};
 
-const SHADER: &str = include_str!("../shaders/atmosphere.wgsl");
+const SHADER: &str = concat!(include_str!("../shaders/fullscreen.wgsl"), include_str!("../shaders/atmosphere.wgsl"));
 
 /// What one frame of the atmosphere pass draws. Coordinates are fractions of the widget.
 #[derive(Debug, Clone, Copy)]
@@ -71,11 +76,7 @@ struct Uniforms {
     _pad1: f32,
 }
 
-pub struct Gpu {
-    pipeline: wgpu::RenderPipeline,
-    bind: wgpu::BindGroup,
-    uniform: wgpu::Buffer,
-}
+pub struct Gpu(Fullscreen);
 
 impl ShaderPrimitive for Pass {
     type Pipeline = Gpu;
@@ -102,87 +103,17 @@ impl ShaderPrimitive for Pass {
             _pad0: 0.0,
             _pad1: 0.0,
         };
-        queue.write_buffer(&pipeline.uniform, 0, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(&pipeline.0.uniform, 0, bytemuck::bytes_of(&uniforms));
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &pipeline.bind, &[]);
-        pass.draw(0..3, 0..1);
+        pipeline.0.draw(pass);
         true
-    }
-
-    fn render(
-        &self,
-        _pipeline: &Self::Pipeline,
-        _encoder: &mut wgpu::CommandEncoder,
-        _target: &wgpu::TextureView,
-        _clip: &Rectangle<u32>,
-    ) {
-        let _ = self.atmosphere.glow_alpha;
     }
 }
 
 impl shader::Pipeline for Gpu {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("folia-atmosphere"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("folia-atmosphere"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("folia-overlay"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("folia-atmosphere"),
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("folia-atmosphere"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("folia-atmosphere"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_overlay"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        Self { pipeline, bind, uniform }
+        Self(Fullscreen::new(device, format, "folia-atmosphere", SHADER, "fs_overlay", std::mem::size_of::<Uniforms>()))
     }
 }
