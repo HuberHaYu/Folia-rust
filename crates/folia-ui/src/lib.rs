@@ -193,7 +193,12 @@ impl Shell {
         let omni = Omni::new(init.cache_dir, init.keyring_service)
             .inspect_err(|err| tracing::error!(error = err as &dyn std::error::Error, "online music unavailable"))
             .ok();
-        let (library, load) = LibraryPage::new(init.library_db, init.general.home_tab, omni.clone());
+        let (library, load) = LibraryPage::new(
+            init.library_db,
+            init.general.home_tab,
+            omni.clone(),
+            init.general.online_provider.as_deref(),
+        );
         let shell = Self {
             store: init.store,
             general: init.general,
@@ -364,7 +369,8 @@ impl Shell {
                 if matches!(message, search::Message::Frame) && self.page == Page::Search && self.search.gone(now) {
                     self.page = Page::Library;
                 }
-                let (task, play) = self.search.update(message, self.omni.as_ref());
+                let provider = self.library.online.provider();
+                let (task, play) = self.search.update(message, self.omni.as_ref(), provider);
                 let task = task.map(Message::Search);
                 match play {
                     Some(index) => {
@@ -505,11 +511,20 @@ impl Shell {
             }
             Message::Chrome(message) => self.chrome(message),
             Message::Login(message) => {
-                let signed_in = self.library.online.signed_in().is_some();
-                let (task, effect) = self.login.update(message, self.omni.as_ref(), signed_in);
+                let (task, effect) = self.login.update(message, self.omni.as_ref(), &self.library.online);
                 let task = task.map(Message::Login);
                 let follow = match effect {
-                    Some(login::Effect::Confirmed) => self.library.signed_in().map(Message::Library),
+                    Some(login::Effect::Confirmed(provider)) => {
+                        let switching = provider != self.library.online.provider();
+                        let clear = if switching { self.leave_provider() } else { Task::none() };
+                        let read = self.library.signed_in(provider, &self.i18n).map(Message::Library);
+                        Task::batch([clear, read, self.keep_provider(provider)])
+                    }
+                    Some(login::Effect::Switch(provider)) => {
+                        let clear = self.leave_provider();
+                        let read = self.library.switch_provider(provider, &self.i18n).map(Message::Library);
+                        Task::batch([clear, read, self.keep_provider(provider)])
+                    }
                     Some(login::Effect::SignOut) => {
                         // Signing out of the active platform empties the player, as a switch does.
                         self.playback.clear();
@@ -527,9 +542,27 @@ impl Shell {
 
     /// Opens the shared sign-in window: on the platform in use when someone is signed in, unchosen for a guest.
     fn open_login(&mut self) -> Task<Message> {
-        let signed_in = self.library.online.signed_in().is_some();
-        let provider = signed_in.then_some(online::PROVIDER);
-        self.login.open(provider, signed_in, self.omni.as_ref()).map(Message::Login)
+        let online = &self.library.online;
+        let provider = online.signed_in().is_some().then_some(online.provider());
+        self.login.open(provider, online, self.omni.as_ref()).map(Message::Login)
+    }
+
+    /// Another platform takes over: the player empties, as a sign-out does, since its songs belong to the old one.
+    fn leave_provider(&mut self) -> Task<Message> {
+        self.playback.clear();
+        if self.page == Page::NowPlaying {
+            self.page = Page::Library;
+        }
+        Task::none()
+    }
+
+    /// Remembers the platform in use for the next start (`activeProviderId`).
+    fn keep_provider(&mut self, provider: &'static str) -> Task<Message> {
+        if self.general.online_provider.as_deref() == Some(provider) {
+            return Task::none();
+        }
+        self.general.online_provider = Some(provider.to_owned());
+        save(&self.store, &self.general)
     }
 
     /// Plays what the home wall chose, or keeps the tab it switched to.
@@ -710,6 +743,12 @@ impl Shell {
         let mut frame: iced::widget::Stack<'_, Message, iced::Theme, iced::Renderer> = if playing {
             stack![page]
         } else if self.page == Page::Search {
+            let provider = self.library.online.provider();
+            let search_source = self
+                .omni
+                .as_ref()
+                .and_then(|omni| omni.platforms().into_iter().find(|platform| platform.id == provider))
+                .map_or(provider, |platform| platform.short_name);
             let search = self
                 .search
                 .view(
@@ -721,6 +760,7 @@ impl Shell {
                         daylight,
                         width: self.window_size.width,
                         playing: self.playback.current().map(|track| track.id),
+                        source: search_source,
                     },
                     now,
                 )
@@ -827,6 +867,8 @@ impl Shell {
             daylight,
             window: self.window_size,
             platforms: self.omni.as_ref().map(Omni::platforms).unwrap_or_default(),
+            active: self.library.online.provider(),
+            kept: self.library.online.kept(),
             account: &self.library.online.account,
             avatar: self.library.online.avatar.as_ref(),
             has_track: self.playback.current().is_some(),
@@ -1093,7 +1135,8 @@ impl Shell {
         if !self.library.tab.is_online() || self.library.layer.is_some() {
             return None;
         }
-        let platform = self.omni.as_ref()?.platforms().into_iter().find(|platform| platform.id == online::PROVIDER)?;
+        let provider = self.library.online.provider();
+        let platform = self.omni.as_ref()?.platforms().into_iter().find(|platform| platform.id == provider)?;
         let mark = folia_visualizer::color(folia_core::Rgb::hex(platform.color), 1.0);
         let label = platform.short_name;
         Some(match self.library.online.signed_in() {

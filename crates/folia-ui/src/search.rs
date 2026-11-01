@@ -1,4 +1,4 @@
-// Full-screen search from `SearchWorkspace`: a tinted page, one field, the Netease source, then the track list.
+// Full-screen search from `SearchWorkspace`: a tinted page, one field, the platform in use, then the track list.
 
 use std::time::Instant;
 
@@ -16,7 +16,6 @@ use crate::track_list::TrackList;
 use lucide_static_svg::Icon;
 
 const PAGE_SIZE: u32 = 50;
-const PROVIDER: &str = "netease";
 const FADE_MS: f64 = 200.0;
 const FADE_EASE: Ease = Ease::new(0.0, 0.0, 0.2, 1.0);
 
@@ -93,7 +92,12 @@ impl SearchPage {
     }
 
     /// Handles a page message; returns the index of a result to play when one was chosen.
-    pub fn update(&mut self, message: Message, omni: Option<&Omni>) -> (Task<Message>, Option<usize>) {
+    pub fn update(
+        &mut self,
+        message: Message,
+        omni: Option<&Omni>,
+        provider: &'static str,
+    ) -> (Task<Message>, Option<usize>) {
         match message {
             Message::Query(query) => self.query = query,
             Message::Submit => {
@@ -106,7 +110,7 @@ impl SearchPage {
                 self.submitted = true;
                 self.error = false;
                 let search = async move {
-                    omni.search(PROVIDER, &query, PAGE_SIZE, 0).await.map(|page| page.items).map_err(|err| {
+                    omni.search(provider, &query, PAGE_SIZE, 0).await.map(|page| page.items).map_err(|err| {
                         tracing::warn!(error = &err as &dyn std::error::Error, "search failed");
                         error_chain(&err)
                     })
@@ -238,10 +242,12 @@ pub struct View<'a> {
     pub daylight: bool,
     pub width: f32,
     pub playing: Option<i64>,
+    /// The short name of the platform searched.
+    pub source: &'static str,
 }
 
 fn source_pill<'a>(view: View<'a>, shown: f32) -> Element<'a, Message> {
-    let label = text(view.i18n.t("search.sourceNetease")).size(12).font(medium()).color(view.background);
+    let label = text(view.source).size(12).font(medium()).color(view.background);
     button(label)
         .padding([8, 16])
         .style(move |_theme: &Theme, _status| button::Style {

@@ -1,4 +1,4 @@
-// App-wide preferences: the interface language and the home tab last opened.
+// App-wide preferences: the interface language, the home tab last opened and the online platform in use.
 
 use folia_core::LanguagePreference;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,8 @@ pub struct GeneralSettings {
     pub language: LanguagePreference,
     /// The home tab to open on, like the original's `LAST_HOME_VIEW_TAB_KEY`.
     pub home_tab: HomeTab,
+    /// The online platform last used (`activeProviderId`); never a credential.
+    pub online_provider: Option<String>,
 }
 
 /// The home page's first-level tabs; the original starts on the playlists.

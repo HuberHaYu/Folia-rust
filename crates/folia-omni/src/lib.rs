@@ -31,6 +31,9 @@ pub enum OmniError {
     Unavailable,
     #[error("not signed in")]
     SignedOut,
+    /// The platform has no such capability in the original either.
+    #[error("{0} is not supported on this platform")]
+    Unsupported(&'static str),
     #[error("cannot draw the sign-in code")]
     Qr(#[from] qrcode::types::QrError),
     #[error("system keyring refused")]

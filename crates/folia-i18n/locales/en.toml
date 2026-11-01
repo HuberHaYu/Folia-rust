@@ -208,6 +208,7 @@ qrScanned = "Scanned! Confirm on your phone."
 radio = "Radio"
 retryQr = "Refresh QR code"
 switchOnlineProvider = "Switch online music provider"
+switchToProvider = "Switch to {{provider}}"
 gridSearchNoResults = "No matching songs"
 exploreRefresh = "Refresh"
 

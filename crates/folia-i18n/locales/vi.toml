@@ -208,6 +208,7 @@ qrScanned = "Đã quét! Xác nhận trên điện thoại."
 radio = "Radio"
 retryQr = "Làm mới mã QR"
 switchOnlineProvider = "Đổi nền tảng nhạc trực tuyến"
+switchToProvider = "Chuyển sang {{provider}}"
 gridSearchNoResults = "Không có bài hát phù hợp"
 exploreRefresh = "Đổi danh sách khác"
 

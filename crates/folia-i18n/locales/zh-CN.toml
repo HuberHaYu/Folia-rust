@@ -208,6 +208,7 @@ qrScanned = "扫描成功！请在手机上确认。"
 radio = "电台"
 retryQr = "刷新二维码"
 switchOnlineProvider = "切换在线音乐平台"
+switchToProvider = "切换至{{provider}}"
 gridSearchNoResults = "没有匹配的歌曲"
 exploreRefresh = "换一批"
 

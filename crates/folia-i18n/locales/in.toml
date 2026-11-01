@@ -208,6 +208,7 @@ qrScanned = "Dipindai! Konfirmasi di ponsel Anda."
 radio = "Radio"
 retryQr = "Muat ulang kode QR"
 switchOnlineProvider = "Ganti penyedia musik online"
+switchToProvider = "Ganti ke {{provider}}"
 gridSearchNoResults = "Tidak ada lagu yang cocok"
 exploreRefresh = "Muat ulang"
 
