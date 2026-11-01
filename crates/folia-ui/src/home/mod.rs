@@ -40,6 +40,10 @@ const ROW_NARROW: f32 = 72.0;
 const ROW_SPINE: f32 = 52.0;
 /// `BRAVAIS_SEAM_FULL_WIDTH` and `BRAVAIS_SEAM_ROW_FULL_HEIGHT`: a collection's full info strip.
 const FULL: f32 = 300.0;
+/// `BRAVAIS_PANEL_MAX_WIDTH`.
+pub const PANEL: f32 = 420.0;
+/// `BRAVAIS_LIST_ROW_HEIGHT`.
+pub const LIST_ROW: f32 = 44.0;
 const ROW_FULL: f32 = 212.0;
 /// Presence spring of the player safe area: stiffness 280, damping 28.
 const PRESENCE_MS: f64 = 600.0;
@@ -64,6 +68,8 @@ pub enum Message {
     Player,
     Import,
     Reload,
+    /// 「换一批」 on the explore tab.
+    RefreshExplore,
     Dismiss,
     Frame,
     Volume(f32),
@@ -76,12 +82,23 @@ pub enum Message {
     /// The collection seam's back: returns to the home layer.
     Back,
     PlayAll,
+    EnqueueAll,
+    Query(String),
+    OpenList,
+    ListScrolled(f32),
+    LocateRow(usize),
+    PlayRow(usize),
+    ToggleSubscribe,
+    CollectionMenu,
+    ReloadCollection,
+    RowHover(Option<usize>),
 }
 
 pub struct HomeChrome {
     level: Level,
-    /// A collection layer is open: the narrow seam widens into the full info strip.
-    collection: bool,
+    /// The open width of the full level, vertical and sideways: the home seam, a collection's info strip,
+    /// or its list panel.
+    full: (f32, f32),
     restore: Level,
     horizontal: bool,
     /// The axis to open on once the current one has shut.
@@ -116,7 +133,7 @@ impl HomeChrome {
         let now = Instant::now();
         Self {
             level: Level::Full,
-            collection: false,
+            full: (NARROW, ROW_NARROW),
             restore: Level::Full,
             horizontal: false,
             pending_horizontal: None,
@@ -171,17 +188,31 @@ impl HomeChrome {
             | Message::Search
             | Message::Import
             | Message::Reload
+            | Message::RefreshExplore
             | Message::SelectTab(_)
             | Message::Connect
             | Message::Back
-            | Message::PlayAll => {
+            | Message::PlayAll
+            | Message::EnqueueAll
+            | Message::OpenList
+            | Message::ToggleSubscribe
+            | Message::ReloadCollection => {
                 self.set_menu(now, false);
                 if self.tools_goal > 0.5 {
                     self.retarget_tools(now, 0.0);
                 }
             }
             Message::BackHover(hovered) => self.back_hover.set(if *hovered { 1.0 } else { 0.0 }, now),
-            Message::Frame | Message::Volume(_) | Message::VolumeDone | Message::Mute => {}
+            Message::Frame
+            | Message::Volume(_)
+            | Message::VolumeDone
+            | Message::Mute
+            | Message::Query(_)
+            | Message::ListScrolled(_)
+            | Message::LocateRow(_)
+            | Message::PlayRow(_)
+            | Message::CollectionMenu
+            | Message::RowHover(_) => {}
         }
     }
 
@@ -199,12 +230,18 @@ impl HomeChrome {
         }
     }
 
-    /// Opens the full info strip for a collection layer, or narrows back to the home seam.
-    pub fn set_collection(&mut self, collection: bool, now: Instant) {
-        if collection == self.collection {
+    /// Opens the full info strip for a collection layer (`BRAVAIS_SEAM_FULL_WIDTH`), its list panel
+    /// (`min(BRAVAIS_PANEL_MAX_WIDTH, viewport − 52)`), or narrows back to the home seam.
+    pub fn set_collection(&mut self, collection: bool, list: bool, now: Instant) {
+        let full = match (collection, list) {
+            (false, _) => (NARROW, ROW_NARROW),
+            (true, false) => (FULL, ROW_FULL),
+            (true, true) => (PANEL.min(self.seen_width - 52.0).max(FULL.min(self.seen_width)), ROW_FULL),
+        };
+        if full == self.full {
             return;
         }
-        self.collection = collection;
+        self.full = full;
         self.set_menu(now, false);
         if self.level != Level::Hidden {
             self.retarget_seam(now);
@@ -231,7 +268,7 @@ impl HomeChrome {
         self.pending_horizontal = None;
         self.horizontal = next;
         self.seam_from = 0.0;
-        self.seam_goal = open_width(self.level, next, self.collection);
+        self.seam_goal = open_width(self.level, next, self.full);
         self.seam_at = now;
         Some(next)
     }
@@ -250,7 +287,7 @@ impl HomeChrome {
 
     /// The width this level opens to, not the width it has animated to.
     pub fn goal(&self) -> f32 {
-        open_width(self.level, self.horizontal, self.collection)
+        open_width(self.level, self.horizontal, self.full)
     }
 
     pub fn set_back(&mut self, shown: bool, now: Instant) {
@@ -314,7 +351,7 @@ impl HomeChrome {
             self.level = level;
             self.restore = level;
             self.seen_width = width;
-            let open = open_width(level, self.horizontal, self.collection);
+            let open = open_width(level, self.horizontal, self.full);
             self.seam_from = open;
             self.seam_goal = open;
             self.seam_at = now;
@@ -358,7 +395,7 @@ impl HomeChrome {
             return;
         }
         self.seam_from = 0.0;
-        self.seam_goal = open_width(self.level, self.horizontal, self.collection);
+        self.seam_goal = open_width(self.level, self.horizontal, self.full);
         self.seam_at = now;
     }
 
@@ -383,7 +420,7 @@ impl HomeChrome {
 
     fn retarget_seam(&mut self, now: Instant) {
         self.seam_from = self.width(now);
-        self.seam_goal = open_width(self.level, self.horizontal, self.collection);
+        self.seam_goal = open_width(self.level, self.horizontal, self.full);
         self.seam_at = now;
     }
 
@@ -415,15 +452,13 @@ fn default_level(width: f32) -> Level {
     if default_level_is_spine(width) { Level::Spine } else { Level::Full }
 }
 
-fn open_width(level: Level, horizontal: bool, collection: bool) -> f32 {
-    match (level, horizontal, collection) {
-        (Level::Hidden, ..) => 0.0,
-        (Level::Spine, false, _) => SPINE,
-        (Level::Spine, true, _) => ROW_SPINE,
-        (Level::Full, false, false) => NARROW,
-        (Level::Full, true, false) => ROW_NARROW,
-        (Level::Full, false, true) => FULL,
-        (Level::Full, true, true) => ROW_FULL,
+fn open_width(level: Level, horizontal: bool, full: (f32, f32)) -> f32 {
+    match (level, horizontal) {
+        (Level::Hidden, _) => 0.0,
+        (Level::Spine, false) => SPINE,
+        (Level::Spine, true) => ROW_SPINE,
+        (Level::Full, false) => full.0,
+        (Level::Full, true) => full.1,
     }
 }
 
@@ -441,6 +476,8 @@ pub struct Host<'a> {
     pub daylight: bool,
     pub has_track: bool,
     pub busy: bool,
+    /// The explore tab's 「换一批」 (`refresh-explore`): `Some(enabled)` while the tab shows the page.
+    pub explore_refresh: Option<bool>,
     pub volume: f32,
     pub muted: bool,
     pub window_width: f32,
@@ -460,7 +497,39 @@ pub struct Host<'a> {
     /// The account entry above the tools, on online tabs only.
     pub account: Option<AccountSlot<'a>>,
     /// The open collection's title and count line; `None` on the home layer.
-    pub layer: Option<(String, String)>,
+    pub layer: Option<LayerSeam>,
+    /// The list row under the pointer.
+    pub list_hover: Option<usize>,
+}
+
+/// The open collection as its seam shows it (`useBravaisCollectionSeam`).
+#[derive(Debug, Clone)]
+pub struct LayerSeam {
+    pub title: String,
+    /// The count, or `matches / total` while filtering.
+    pub meta: String,
+    pub query: String,
+    pub filtering: bool,
+    pub match_label: String,
+    /// Saved, saving in flight, and the star's title; `None` where it cannot be saved.
+    pub star: Option<(bool, bool, String)>,
+    pub list: bool,
+    /// The list rows in view start at row `first` of `count`.
+    pub first: usize,
+    pub count: usize,
+    pub rows: Vec<ListRow>,
+    pub menu: bool,
+    pub playable: bool,
+}
+
+/// One row of the song list (`BravaisListPanel`): number, title over artist, length.
+#[derive(Debug, Clone)]
+pub struct ListRow {
+    pub badge: String,
+    pub title: String,
+    pub subtitle: String,
+    pub time: String,
+    pub current: bool,
 }
 
 /// The seam's account entry (`BravaisSeamAccountSwitcher`).

@@ -1,4 +1,5 @@
 // The first page of NetEase's explore feed: daily songs, the home page blocks, daily playlists and the charts.
+// Every read is a read anew (`refreshReadsAnew`): each shelf hands out what it has not handed out yet first.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -7,6 +8,7 @@ use super::account::object;
 use super::eapi::{self, Client};
 use super::library::daily_songs;
 use super::{Song, collection, track};
+use crate::reads::HandedOut;
 use crate::{CollectionKind, ExploreEntry, ExploreSection, OmniError, Shelf};
 
 /// A shelf hands out this many entries in one read (`BATCH`).
@@ -14,8 +16,15 @@ const BATCH: usize = 12;
 /// The home page's block of charts is left out: the charts come from NetEase's own list of them.
 const CHART_BLOCK: &str = "HOMEPAGE_BLOCK_TOPLIST";
 
+/// What the reads before handed out (`newMemory`), begun anew when a read finds the account came or went.
+#[derive(Default)]
+pub struct Memory {
+    handed: HandedOut,
+    had_account: Option<bool>,
+}
+
 /// Reads the parts side by side in spirit: each may fail alone, all of them failing fails the page.
-pub async fn first_page(client: &Client) -> Result<Vec<ExploreSection>, OmniError> {
+pub async fn first_page(client: &Client, memory: &std::sync::Mutex<Memory>) -> Result<Vec<ExploreSection>, OmniError> {
     let signed_in = client.session().signed_in();
     let home = client.post("/api/homepage/block/page", object(json!({ "refresh": true }))).await;
     let charts = client.post("/api/toplist", Map::new()).await;
@@ -30,23 +39,28 @@ pub async fn first_page(client: &Client) -> Result<Vec<ExploreSection>, OmniErro
         return Err(home.err().or(charts.err()).unwrap_or(OmniError::Response("explore page".to_owned())));
     }
 
+    let mut memory = memory.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if memory.had_account != Some(signed_in) {
+        *memory = Memory { had_account: Some(signed_in), ..Memory::default() };
+    }
+    let handed = &mut memory.handed;
     let mut sections = Vec::new();
     if let Some(Ok(songs)) = daily {
-        let entries: Vec<ExploreEntry> = songs.into_iter().take(BATCH).map(ExploreEntry::Song).collect();
-        push(&mut sections, "netease-daily-songs".to_owned(), Shelf::DailySongs, entries);
+        let entries = songs.into_iter().map(ExploreEntry::Song).collect();
+        push(&mut sections, handed, "netease-daily-songs".to_owned(), Shelf::DailySongs, entries);
     }
     if let Ok(answer) = &home
         && eapi::check(&answer.body).is_ok()
     {
         for (key, title, entries) in blocks(&answer.body) {
-            push(&mut sections, key, Shelf::Block(title), entries);
+            push(&mut sections, handed, key, Shelf::Block(title), entries);
         }
     }
     if let Some(Ok(answer)) = &lists {
         let rows = answer.body.get("recommend").and_then(Value::as_array).cloned().unwrap_or_default();
         let entries =
             rows.iter().filter_map(|row| collection(row, CollectionKind::Playlist)).map(ExploreEntry::Collection);
-        push(&mut sections, "netease-daily-playlists".to_owned(), Shelf::DailyPlaylists, entries.take(BATCH).collect());
+        push(&mut sections, handed, "netease-daily-playlists".to_owned(), Shelf::DailyPlaylists, entries.collect());
     }
     if let Ok(answer) = &charts {
         let rows = answer.body.get("list").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -59,18 +73,30 @@ pub async fn first_page(client: &Client) -> Result<Vec<ExploreSection>, OmniErro
                     row.get("updateFrequency").and_then(Value::as_str).map(str::to_owned).or(chart.description);
                 Some(ExploreEntry::Collection(chart))
             })
-            .take(BATCH)
             .collect();
-        push(&mut sections, "netease-charts".to_owned(), Shelf::Charts, entries);
+        push(&mut sections, handed, "netease-charts".to_owned(), Shelf::Charts, entries);
     }
     tracing::info!(shelves = sections.len(), signed_in, "netease explore page read");
     Ok(sections)
 }
 
-fn push(sections: &mut Vec<ExploreSection>, key: String, shelf: Shelf, entries: Vec<ExploreEntry>) {
-    if !entries.is_empty() {
-        sections.push(ExploreSection { key, shelf, entries });
+/// `handOut`: one batch of all NetEase lists under the shelf now, each entry once, the ones not handed out first.
+fn push(
+    sections: &mut Vec<ExploreSection>,
+    handed: &mut HandedOut,
+    key: String,
+    shelf: Shelf,
+    listed: Vec<ExploreEntry>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    let all: Vec<ExploreEntry> = listed.into_iter().filter(|entry| seen.insert(entry_key(entry))).collect();
+    let mut entries = handed.in_turn(&key, all, entry_key);
+    entries.truncate(BATCH);
+    if entries.is_empty() {
+        return;
     }
+    handed.note(&key, entries.iter().map(entry_key));
+    sections.push(ExploreSection { key, shelf, entries });
 }
 
 /// The home page's blocks as shelves under NetEase's headings: songs, playlists and albums only, each once,
@@ -98,7 +124,6 @@ fn blocks(body: &Value) -> Vec<(String, String, Vec<ExploreEntry>)> {
             .flatten()
             .filter_map(entry)
             .filter(|entry| seen.insert(entry_key(entry)))
-            .take(BATCH)
             .collect();
         if entries.is_empty() {
             continue;

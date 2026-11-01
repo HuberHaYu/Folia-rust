@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use folia_core::{Lyrics, Queue, Repeat, Track};
-use folia_omni::Omni;
+use folia_omni::{Collection, Omni};
 use folia_player::{Player, PlayerState, Status};
 use folia_store::{PlaybackSettings, Store};
 use iced::Task;
@@ -24,6 +24,10 @@ pub struct Playback {
     seeking: Option<f64>,
     /// Tracks that failed one after another; playback stops once the whole queue has failed.
     failures: usize,
+    /// Personal FM's feed while the queue is FM (`isFmMode`): stepping on near its end fetches another batch.
+    fm: Option<Collection>,
+    /// A batch is on its way; steps wait for it.
+    topping_up: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +55,12 @@ pub enum Message {
     Tick,
     LyricsLoaded(i64, Option<Lyrics>),
     AudioReady(i64, Result<PathBuf, String>),
+    /// A personal FM batch for the step away from the track with this id; `finished` as in `Queue::advance`.
+    FmBatch {
+        from: i64,
+        finished: bool,
+        batch: Result<Vec<Track>, String>,
+    },
 }
 
 impl Playback {
@@ -79,6 +89,8 @@ impl Playback {
             lyric_offset: 0.0,
             seeking: None,
             failures: 0,
+            fm: None,
+            topping_up: false,
         }
     }
 
@@ -114,13 +126,34 @@ impl Playback {
             Some(origin) => self.queue.replace_from(tracks, index, origin),
             None => self.queue.replace(tracks, index),
         }
+        self.set_fm(None);
         self.start_current()
+    }
+
+    /// Plays personal FM's first batch; stepping on near the end fetches more from `fm` (`fmNeedsTopUpAt`).
+    pub fn play_fm(&mut self, tracks: Vec<Track>, fm: Collection, origin: folia_core::Origin) -> Task<Message> {
+        self.queue.replace_from(tracks, 0, origin);
+        self.set_fm(Some(fm));
+        self.start_current()
+    }
+
+    /// Personal FM never goes round (`queueLoopMode`): the queue's repeat is off while it plays.
+    fn set_fm(&mut self, fm: Option<Collection>) {
+        self.fm = fm;
+        self.topping_up = false;
+        self.queue.repeat = if self.fm.is_some() { Repeat::Off } else { self.settings.repeat };
+    }
+
+    /// Adds `tracks` to the end of the queue (`enqueueAll`), keeping what plays; returns how many were added.
+    pub fn enqueue(&mut self, tracks: Vec<Track>) -> usize {
+        self.queue.append(tracks, |a, b| a.id == b.id)
     }
 
     /// Empties the queue and stops, as signing out of the active platform does (`resetForProviderSwitch`).
     pub fn clear(&mut self) {
         self.with_player(Player::stop);
         self.queue.replace(Vec::new(), 0);
+        self.set_fm(None);
         self.lyrics = None;
         self.lyric_offset = 0.0;
         self.seeking = None;
@@ -174,7 +207,9 @@ impl Playback {
                     Repeat::All => Repeat::One,
                     Repeat::One => Repeat::Off,
                 };
-                self.queue.repeat = self.settings.repeat;
+                if self.fm.is_none() {
+                    self.queue.repeat = self.settings.repeat;
+                }
                 save(store, &self.settings)
             }
             Message::Jump(index) => {
@@ -223,6 +258,21 @@ impl Playback {
                     }
                 }
             }
+            Message::FmBatch { from, finished, batch } => {
+                // A queue started meanwhile, or a song chosen meanwhile, overtakes the batch.
+                if !self.topping_up || self.current().is_none_or(|track| track.id != from) {
+                    return Task::none();
+                }
+                self.topping_up = false;
+                match batch {
+                    // `freshFmSongs`: only songs not in the queue yet.
+                    Ok(batch) => {
+                        self.queue.append(batch, |a, b| a.id == b.id);
+                    }
+                    Err(err) => tracing::warn!(error = %err, "personal FM batch unavailable"),
+                }
+                self.step(finished)
+            }
         }
     }
 
@@ -254,6 +304,24 @@ impl Playback {
     }
 
     fn advance(&mut self, finished: bool) -> Task<Message> {
+        if self.topping_up {
+            return Task::none();
+        }
+        let near_end = self.queue.current_index().is_some_and(|index| index + 2 >= self.queue.items().len());
+        if let (true, Some(fm), Some(omni), Some(from)) =
+            (near_end, self.fm.clone(), self.omni.clone(), self.current().map(|track| track.id))
+        {
+            self.topping_up = true;
+            return Task::perform(async move { omni.collection_detail(&fm).await }, move |result| Message::FmBatch {
+                from,
+                finished,
+                batch: result.map(|detail| detail.tracks).map_err(|err| error_chain(&err)),
+            });
+        }
+        self.step(finished)
+    }
+
+    fn step(&mut self, finished: bool) -> Task<Message> {
         if self.queue.advance(finished).is_some() {
             return self.start_current();
         }
@@ -265,6 +333,8 @@ impl Playback {
     /// Starts the current track: local files play at once, online tracks are downloaded first.
     fn start_current(&mut self) -> Task<Message> {
         let Some(track) = self.queue.current().cloned() else { return Task::none() };
+        // A track started any other way overtakes a personal FM batch on its way.
+        self.topping_up = false;
         self.lyrics = None;
         self.lyric_offset = 0.0;
         self.seeking = None;

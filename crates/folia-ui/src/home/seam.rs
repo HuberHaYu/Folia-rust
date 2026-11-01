@@ -94,10 +94,11 @@ fn clip_frame(host: &Host<'_>) -> ((f32, f32), (f32, f32), Vector) {
 }
 
 fn column_layout(host: &Host<'_>) -> f32 {
-    match (host.spine, host.layer.is_some()) {
+    match (host.spine, host.layer.as_ref().map(|layer| layer.list)) {
         (true, _) => LAYOUT_SPINE,
-        (false, true) => LAYOUT_FULL,
-        (false, false) => LAYOUT_NARROW,
+        (false, Some(true)) => super::PANEL.min(host.window_width - 52.0).max(LAYOUT_FULL.min(host.window_width)),
+        (false, Some(false)) => LAYOUT_FULL,
+        (false, None) => LAYOUT_NARROW,
     }
 }
 
@@ -328,7 +329,7 @@ fn avatar<'a>(slot: &AccountSlot<'a>, size: f32, ink: Color) -> Element<'a, Mess
     let mark = slot.mark;
     let letter = text(slot.letter.to_string())
         .size(if size < 30.0 { 12.0 } else { 14.0 })
-        .font(iced::Font { weight: iced::font::Weight::Black, ..iced::Font::DEFAULT })
+        .font(crate::typeface::font(iced::font::Weight::Black))
         .color(Color::WHITE);
     container(letter)
         .center(Length::Fixed(size))
@@ -345,15 +346,14 @@ fn vertical_title_size(title: &str, base: f32, min: f32) -> f32 {
     (320.0 / title.chars().count().max(1) as f32).round().clamp(min, base)
 }
 
-/// The full info strip of a collection layer (`FullSeam`): crumbs, the vertical title, the count, play all.
+/// The full info strip of a collection layer (`FullSeam`): crumbs, the page filter, the vertical title, the count,
+/// play all, enqueue and the star, then the list and ⋯ more. The open list panel replaces it.
 fn collection_full<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
-    let (title, meta) = host.layer.clone().unwrap_or_default();
-    let back = back_button(host, ink);
-    let trail = format!("{} › {}", super::tr(host, "libraryBravais.homeTitle"), title);
-    let crumbs = row![back, text(trail).size(11).color(soft(ink)).wrapping(iced::widget::text::Wrapping::None)]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .height(Length::Fixed(32.0));
+    let Some(seam) = host.layer.as_ref() else { return space().into() };
+    if seam.list {
+        return list_panel(host, seam, ink);
+    }
+    let crumbs = crumbs(host, seam, ink, false);
     let quote = |mark: &'static str, side: Alignment| {
         container(
             text(mark)
@@ -364,8 +364,8 @@ fn collection_full<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
         .width(Length::Fill)
         .align_x(side)
     };
-    let size = vertical_title_size(&title, 52.0, 26.0);
-    let vertical = container(tracked_col_weight(&title, size, 0.04, ink, iced::font::Weight::ExtraBold))
+    let size = vertical_title_size(&seam.title, 52.0, 26.0);
+    let vertical = container(tracked_col_weight(&seam.title, size, 0.04, ink, iced::font::Weight::ExtraBold))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -374,47 +374,399 @@ fn collection_full<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
     let area = column![quote("\u{201c}", Alignment::End), vertical, quote("\u{201d}", Alignment::Start)]
         .spacing(14)
         .height(Length::Fill);
-    let rule = container(space()).width(Length::Fill).height(Length::Fixed(1.0)).style(move |_theme: &Theme| {
-        container::Style {
-            background: Some(Background::Color(Color { a: 0.12 * ink.a, ..ink })),
-            ..container::Style::default()
-        }
-    });
-    let mut body = column![crumbs, area, rule, text(meta).size(12).color(soft(ink))].spacing(14);
+    let mut body = column![
+        crumbs,
+        filter_field(host, seam, ink),
+        area,
+        hairline(ink, 0.12),
+        text(seam.meta.clone()).size(12).color(soft(ink))
+    ]
+    .spacing(14);
     if let Some(status) = &host.status {
         body = body.push(text(status.clone()).size(12).color(ink));
     }
-    body = body.push(play_all(host, ink));
-    body.padding(iced::Padding { top: 22.0, right: 22.0, bottom: host.bottom, left: 22.0 })
-        .width(Length::Fixed(LAYOUT_FULL))
+    let mut actions = vec![
+        chrome_button(
+            Icon::Play,
+            super::tr(host, "libraryBravais.playAll"),
+            true,
+            ink,
+            seam.playable.then_some(Message::PlayAll),
+        ),
+        chrome_button(
+            Icon::ListPlus,
+            super::tr(host, "libraryBravais.enqueueAll"),
+            false,
+            ink,
+            seam.playable.then_some(Message::EnqueueAll),
+        ),
+    ];
+    if let Some((saved, pending, title)) = &seam.star {
+        actions.push(star(*saved, *pending, title.clone(), host.accent, ink));
+    }
+    // `.bravais-seam-actions { flex-wrap: wrap }`.
+    let actions = row(actions).spacing(6).wrap();
+    let more = row![
+        chrome_button(
+            Icon::List,
+            super::tr(host, "libraryBravaisCollection.list"),
+            false,
+            ink,
+            Some(Message::OpenList)
+        ),
+        chrome_button(
+            Icon::Ellipsis,
+            super::tr(host, "libraryBravaisCollection.more"),
+            false,
+            ink,
+            Some(Message::CollectionMenu)
+        ),
+    ]
+    .spacing(6)
+    .wrap();
+    body = body.push(actions).push(more);
+    let body = body
+        .padding(iced::Padding { top: 22.0, right: 22.0, bottom: host.bottom, left: 22.0 })
+        .width(Length::Fixed(column_layout(host)))
+        .height(Length::Fill);
+    if !seam.menu {
+        return body.into();
+    }
+    // `.bravais-seam-more-anchor > .bravais-seam-menu`: floats 6px above the button row, over the strip.
+    let menu = collection_menu(host, ink);
+    let lifted = container(menu)
+        .width(Length::Fixed(column_layout(host)))
+        .height(Length::Fill)
+        .align_y(Alignment::End)
+        .padding(iced::Padding { top: 0.0, right: 22.0, bottom: host.bottom + 36.0 + 6.0, left: 22.0 });
+    stack![body, lifted].into()
+}
+
+/// `BravaisSeamCrumbs`: the back button and `书库 › 名字` (`› 列表` while the panel is open).
+fn crumbs<'a>(host: &Host<'a>, seam: &super::LayerSeam, ink: Color, panel: bool) -> Element<'a, Message> {
+    let mut trail = format!("{} › {}", super::tr(host, "libraryBravais.homeTitle"), seam.title);
+    if panel {
+        trail.push_str(" › ");
+        trail.push_str(super::tr(host, "libraryBravaisCollection.listCrumb"));
+    }
+    let mut line = row![
+        back_button(host, ink),
+        container(text(trail).size(11).color(soft(ink)).wrapping(iced::widget::text::Wrapping::None))
+            .width(Length::Fill)
+            .clip(true)
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .height(Length::Fixed(32.0));
+    if panel {
+        // `.bravais-seam-level`: the fold as a word.
+        let label = text(super::tr(host, "libraryBravais.seamFold")).size(11).color(soft(ink));
+        line = line.push(button(label).padding([3.0, 9.0]).on_press(Message::Fold).style(
+            move |_theme: &Theme, status| {
+                let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: hot.then_some(Background::Color(Color { a: 0.16 * ink.a, ..ink })),
+                    border: Border {
+                        radius: 12.0.into(),
+                        width: 1.0,
+                        color: if hot { Color { a: 0.26 * ink.a, ..ink } } else { Color::TRANSPARENT },
+                    },
+                    ..button::Style::default()
+                }
+            },
+        ));
+    }
+    line.into()
+}
+
+/// `BravaisSeamFilterField`: a funnel, the input over an underline, then the match count and a clear button.
+fn filter_field<'a>(host: &Host<'a>, seam: &super::LayerSeam, ink: Color) -> Element<'a, Message> {
+    let has_query = !seam.query.is_empty();
+    let tone = if has_query { ink } else { soft(ink) };
+    let accent = host.accent;
+    let input = iced::widget::text_input(super::tr(host, "libraryBravais.filterPlaceholder"), &seam.query)
+        .on_input(Message::Query)
+        .size(13)
+        .padding(0)
+        .font(crate::typeface::font(iced::font::Weight::Semibold))
+        .style(move |_theme: &Theme, _status| iced::widget::text_input::Style {
+            background: Background::Color(Color::TRANSPARENT),
+            border: Border::default(),
+            icon: tone,
+            placeholder: soft(ink),
+            value: ink,
+            selection: Color { a: 0.3, ..accent },
+        });
+    let mut line =
+        row![icon(Icon::ListFilter, 14.0, if has_query { accent } else { Color { a: tone.a * 0.75, ..tone } }), input]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .height(Length::Fixed(34.0));
+    if has_query {
+        line = line.push(text(seam.match_label.clone()).size(11).color(soft(ink)));
+        let clear = button(container(icon(Icon::X, 14.0, soft(ink))).center(Length::Fill))
+            .width(Length::Fixed(24.0))
+            .height(Length::Fixed(24.0))
+            .padding(0)
+            .on_press(Message::Query(String::new()))
+            .style(move |_theme: &Theme, status| button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then_some(Background::Color(Color { a: 0.1 * ink.a, ..ink })),
+                border: Border { radius: 8.0.into(), ..Border::default() },
+                ..button::Style::default()
+            });
+        line = line.push(iced::widget::Tooltip::new(
+            clear,
+            text(super::tr(host, "libraryBravaisCollection.clearFilter")).size(12),
+            iced::widget::tooltip::Position::Bottom,
+        ));
+    }
+    let underline = hairline(ink, if has_query { 0.36 } else { 0.18 });
+    container(column![line, underline]).height(Length::Fixed(44.0)).align_y(Alignment::Center).into()
+}
+
+/// The song list panel (`BravaisListPanel`): crumbs, filter, a horizontal title, the count, the rows in view, play
+/// all and enqueue. Rows are 44px; click flies the wall to the song, double-click plays it.
+fn list_panel<'a>(host: &Host<'a>, seam: &super::LayerSeam, ink: Color) -> Element<'a, Message> {
+    let title = text(seam.title.clone())
+        .size(24)
+        .font(crate::typeface::font(iced::font::Weight::ExtraBold))
+        .line_height(iced::widget::text::LineHeight::Relative(1.15))
+        .color(ink)
+        .wrapping(iced::widget::text::Wrapping::None);
+    let row_px = super::LIST_ROW;
+    let before = seam.first as f32 * row_px;
+    let after = seam.count.saturating_sub(seam.first + seam.rows.len()) as f32 * row_px;
+    let mut list = column![space().height(Length::Fixed(before))];
+    for (offset, entry) in seam.rows.iter().enumerate() {
+        list = list.push(list_row(host, entry, seam.first + offset, ink));
+    }
+    list = list.push(space().height(Length::Fixed(after)));
+    let list = iced::widget::scrollable(list.width(Length::Fill))
+        .on_scroll(|viewport| Message::ListScrolled(viewport.absolute_offset().y))
+        .height(Length::Fill);
+    let actions = row![
+        chrome_button(
+            Icon::Play,
+            super::tr(host, "libraryBravais.playAll"),
+            true,
+            ink,
+            seam.playable.then_some(Message::PlayAll)
+        ),
+        chrome_button(
+            Icon::ListPlus,
+            super::tr(host, "libraryBravais.enqueueAll"),
+            false,
+            ink,
+            seam.playable.then_some(Message::EnqueueAll)
+        ),
+    ]
+    .spacing(6);
+    let mut body = column![
+        crumbs(host, seam, ink, true),
+        filter_field(host, seam, ink),
+        container(title).width(Length::Fill).clip(true),
+        text(seam.meta.clone()).size(12).color(soft(ink)),
+    ]
+    .spacing(10);
+    if let (true, Some(status)) = (seam.rows.is_empty(), &host.status) {
+        body = body.push(text(status.clone()).size(12).color(ink));
+    }
+    body.push(container(list).height(Length::Fill))
+        .push(actions)
+        .padding(iced::Padding { top: 22.0, right: 12.0, bottom: host.bottom, left: 12.0 })
+        .width(Length::Fixed(column_layout(host)))
         .height(Length::Fill)
         .into()
 }
 
-/// The spine of a collection layer (`SpineSeam`): back, fold, the vertical title, the count, play, expand.
+/// `.bravais-list-row`: `4ch` number (accent when playing), title over artist, length; hover 12%.
+fn list_row<'a>(host: &Host<'a>, entry: &super::ListRow, index: usize, ink: Color) -> Element<'a, Message> {
+    let badge_color = if entry.current { host.accent } else { soft(ink) };
+    let badge = container(
+        text(entry.badge.clone())
+            .size(11)
+            .font(crate::typeface::font(iced::font::Weight::ExtraBold))
+            .color(badge_color),
+    )
+    .width(Length::Fixed(32.0));
+    let words = column![
+        text(entry.title.clone()).size(13).font(bold()).color(ink).wrapping(iced::widget::text::Wrapping::None),
+        text(entry.subtitle.clone()).size(11).color(soft(ink)).wrapping(iced::widget::text::Wrapping::None),
+    ];
+    let face = row![
+        badge,
+        container(words).width(Length::Fill).clip(true),
+        text(entry.time.clone()).size(11).color(soft(ink))
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    let hovered = host.list_hover == Some(index);
+    let cell =
+        container(face).height(Length::Fixed(super::LIST_ROW)).padding([0.0, 10.0]).align_y(Alignment::Center).style(
+            move |_theme: &Theme| container::Style {
+                background: hovered.then_some(Background::Color(Color { a: 0.12 * ink.a, ..ink })),
+                border: Border { radius: 10.0.into(), ..Border::default() },
+                ..container::Style::default()
+            },
+        );
+    mouse_area(cell)
+        .on_press(Message::LocateRow(index))
+        .on_double_click(Message::PlayRow(index))
+        .on_enter(Message::RowHover(Some(index)))
+        .on_exit(Message::RowHover(None))
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
+}
+
+/// The ⋯ more menu of a collection: reload, a rule, then folding the strip (`BravaisSeamCollectionMenu`).
+fn collection_menu<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
+    let (bg, text_ink) = (host.background, host.text);
+    let paper = Color {
+        r: bg.r * 0.92 + text_ink.r * 0.08,
+        g: bg.g * 0.92 + text_ink.g * 0.08,
+        b: bg.b * 0.92 + text_ink.b * 0.08,
+        a: ink.a,
+    };
+    let item = |label: &'a str, message: Message| -> Element<'a, Message> {
+        button(text(label).size(13).font(crate::typeface::font(iced::font::Weight::Semibold)).color(ink))
+            .width(Length::Fill)
+            .padding([8.0, 10.0])
+            .on_press(message)
+            .style(move |_theme: &Theme, status| button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then_some(Background::Color(Color { a: 0.14 * ink.a, ..ink })),
+                border: Border { radius: 10.0.into(), ..Border::default() },
+                ..button::Style::default()
+            })
+            .into()
+    };
+    let rule = container(hairline(ink, 0.14)).padding([3.0, 6.0]);
+    container(
+        column![
+            item(super::tr(host, "playlist.reload"), Message::ReloadCollection),
+            rule,
+            item(super::tr(host, "libraryBravais.seamFoldStrip"), Message::Fold),
+        ]
+        .width(Length::Fill),
+    )
+    .padding(4)
+    .width(Length::Fill)
+    .style(move |_theme: &Theme| container::Style {
+        background: Some(Background::Color(paper)),
+        border: Border { radius: 12.0.into(), width: 1.0, color: Color { a: 0.14 * ink.a, ..ink } },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// `.bravais-seam-star`: 36px, the outline star in soft ink, filled with the accent once saved; a spinner while saving.
+fn star<'a>(saved: bool, pending: bool, title: String, accent: Color, ink: Color) -> Element<'a, Message> {
+    let glyph: Element<'a, Message> = if pending {
+        icon(Icon::LoaderCircle, 18.0, soft(ink))
+    } else if saved {
+        crate::icons::variant(crate::icons::Variant::FilledStar, 18.0, accent)
+    } else {
+        icon(Icon::Star, 18.0, soft(ink))
+    };
+    let face = button(container(glyph).center(Length::Fill))
+        .width(Length::Fixed(36.0))
+        .height(Length::Fixed(36.0))
+        .padding(0)
+        .on_press_maybe((!pending).then_some(Message::ToggleSubscribe))
+        .style(move |_theme: &Theme, status| button::Style {
+            border: Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: if matches!(status, button::Status::Hovered) {
+                    Color { a: 0.26 * ink.a, ..ink }
+                } else {
+                    Color::TRANSPARENT
+                },
+            },
+            ..button::Style::default()
+        });
+    iced::widget::Tooltip::new(face, text(title).size(12), iced::widget::tooltip::Position::Top).into()
+}
+
+/// `.bravais-seam-actions .bravais-chrome-button`: 36px high, 12px bold with a 14px icon; the primary one on a 16%
+/// fill, the others at 80% until hovered.
+fn chrome_button<'a>(
+    glyph: Icon,
+    label: &'a str,
+    primary: bool,
+    ink: Color,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let enabled = on_press.is_some();
+    button(
+        container(
+            row![icon(glyph, 14.0, ink), text(label).size(12).font(bold()).color(ink)]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        )
+        .height(Length::Fill)
+        .align_y(Alignment::Center),
+    )
+    .height(Length::Fixed(36.0))
+    .padding([0.0, 12.0])
+    .on_press_maybe(on_press)
+    .style(move |_theme: &Theme, status| {
+        let hot = enabled && matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let fill = if primary || hot { 0.16 } else { 0.0 };
+        button::Style {
+            background: Some(Background::Color(Color { a: fill * ink.a, ..ink })),
+            border: Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: if hot { Color { a: 0.26 * ink.a, ..ink } } else { Color::TRANSPARENT },
+            },
+            ..button::Style::default()
+        }
+    })
+    .into()
+}
+
+fn hairline<'a>(ink: Color, alpha: f32) -> Element<'a, Message> {
+    container(space())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(Color { a: alpha * ink.a, ..ink })),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The spine of a collection layer (`SpineSeam`): back, fold, the vertical title, the count, the filter mark, play, expand.
 fn collection_spine<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
-    let (title, meta) = host.layer.clone().unwrap_or_default();
-    let size = vertical_title_size(&title, 30.0, 18.0);
-    let title = button(tracked_col_weight(&title, size, 0.04, ink, iced::font::Weight::ExtraBold))
+    let Some(seam) = host.layer.as_ref() else { return space().into() };
+    let size = vertical_title_size(&seam.title, 30.0, 18.0);
+    let title = button(tracked_col_weight(&seam.title, size, 0.04, ink, iced::font::Weight::ExtraBold))
         .padding(0)
         .on_press(Message::Expand)
         .style(button::text);
-    let count = container(tracked_col(&meta, 11.0, 0.1, soft(ink))).clip(true);
-    column![
+    let count = container(tracked_col(&seam.meta, 11.0, 0.1, soft(ink))).clip(true);
+    let mut items = column![
         ghost(Icon::ChevronLeft, 16.0, 36.0, ink, Some(Message::Back)),
         ghost(Icon::FoldHorizontal, 16.0, 36.0, ink, Some(Message::Fold)),
         container(title).height(Length::Shrink).clip(true),
         count,
-        space().height(Length::Fill),
-        ghost(Icon::Play, 16.0, 36.0, ink, Some(Message::PlayAll)),
-        ghost(Icon::Maximize2, 16.0, 36.0, ink, Some(Message::Expand)),
     ]
     .spacing(12)
-    .align_x(Alignment::Center)
-    .padding(iced::Padding { top: 16.0, right: 8.0, bottom: host.bottom, left: 8.0 })
-    .width(Length::Fixed(LAYOUT_SPINE))
-    .height(Length::Fill)
-    .into()
+    .align_x(Alignment::Center);
+    if seam.filtering {
+        // `.is-filtering`: the spine has no room for the field; pressing it opens the strip.
+        items = items.push(ghost(Icon::ListFilter, 16.0, 36.0, host.accent, Some(Message::Expand)));
+    }
+    items
+        .push(space().height(Length::Fill))
+        .push(ghost(Icon::Play, 16.0, 36.0, ink, Some(Message::PlayAll)))
+        .push(ghost(Icon::Maximize2, 16.0, 36.0, ink, Some(Message::Expand)))
+        .padding(iced::Padding { top: 16.0, right: 8.0, bottom: host.bottom, left: 8.0 })
+        .width(Length::Fixed(LAYOUT_SPINE))
+        .height(Length::Fill)
+        .into()
 }
 
 /// `.bravais-seam-back`: a 32px circle on white 8% (black 5% by day) with a 16px chevron.
@@ -437,44 +789,17 @@ fn back_button<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
     .into()
 }
 
-/// `.bravais-chrome-button.is-primary`: 44px high, 15px bold, a 18px play icon on a 16% fill.
-fn play_all<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
-    let face = row![
-        icon(Icon::Play, 18.0, ink),
-        text(super::tr(host, "libraryBravais.playAll")).size(15).font(bold()).color(ink)
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-    button(container(face).height(Length::Fill).align_y(Alignment::Center))
-        .height(Length::Fixed(44.0))
-        .padding([0.0, 16.0])
-        .on_press(Message::PlayAll)
-        .style(move |_theme: &Theme, status| {
-            let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: Some(Background::Color(Color { a: 0.16 * ink.a, ..ink })),
-                border: Border {
-                    radius: 12.0.into(),
-                    width: 1.0,
-                    color: if hot { Color { a: 0.26 * ink.a, ..ink } } else { Color::TRANSPARENT },
-                },
-                ..button::Style::default()
-            }
-        })
-        .into()
-}
-
 fn row_body<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
     let spine = host.spine;
     let gap = if spine { 10.0 } else { 14.0 };
     let pad_x = (host.window_width * 0.024).max(20.0);
     let fold = ghost(Icon::FoldHorizontal, 16.0, if spine { 34.0 } else { 36.0 }, ink, Some(Message::Fold));
     let mut items: Vec<Element<'a, Message>> = Vec::new();
-    if let Some((title, meta)) = host.layer.clone() {
+    if let Some(seam) = host.layer.as_ref() {
         items.push(ghost(Icon::ChevronLeft, 16.0, if spine { 34.0 } else { 36.0 }, ink, Some(Message::Back)));
         items.push(fold);
-        items.push(tracked_row(&title, if spine { 15.0 } else { 22.0 }, 0.04, 0.0, ink));
-        items.push(text(meta).size(12).color(soft(ink)).into());
+        items.push(tracked_row(&seam.title, if spine { 15.0 } else { 22.0 }, 0.04, 0.0, ink));
+        items.push(text(seam.meta.clone()).size(12).color(soft(ink)).into());
         if let Some(status) = &host.status {
             items.push(text(status.clone()).size(12).color(ink).into());
         }
@@ -482,7 +807,7 @@ fn row_body<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
         items.push(if spine {
             ghost(Icon::Play, 16.0, 34.0, ink, Some(Message::PlayAll))
         } else {
-            play_all(host, ink)
+            chrome_button(Icon::Play, super::tr(host, "libraryBravais.playAll"), true, ink, Some(Message::PlayAll))
         });
     } else {
         items.push(fold);
@@ -531,7 +856,7 @@ fn soft(ink: Color) -> Color {
 /// The ⋯ menu, above the dismiss layer so its rows can be pressed.
 pub fn popup<'a>(home: &'a HomeChrome, host: &Host<'a>, now: Instant) -> Option<Element<'a, Message>> {
     let shown = home.menu(now);
-    let empty = host.current != folia_store::HomeTab::Local && !host.has_track;
+    let empty = host.current != folia_store::HomeTab::Local && !host.has_track && host.explore_refresh.is_none();
     if shown <= 0.02 || host.spine || host.seam.width < 90.0 || host.layer.is_some() || empty {
         return None;
     }
@@ -658,6 +983,10 @@ fn menu<'a>(host: &Host<'a>, ink: Color, shown: f32) -> Element<'a, Message> {
         rows.push(menu_row(super::tr(host, "localMusic.importFolder"), import, ink, shown));
         rows.push(menu_row(super::tr(host, "options.refresh"), reload, ink, shown));
     }
+    if let Some(enabled) = host.explore_refresh {
+        let refresh = enabled.then_some(Message::RefreshExplore);
+        rows.push(menu_row(super::tr(host, "home.exploreRefresh"), refresh, ink, shown));
+    }
     if host.has_track {
         if !rows.is_empty() {
             let rule = Color { a: 0.14 * shown * ink.a, ..ink };
@@ -742,18 +1071,18 @@ fn tracked_col_weight<'a>(
     color: Color,
     weight: iced::font::Weight,
 ) -> Element<'a, Message> {
-    let font = iced::Font { weight, ..iced::Font::DEFAULT };
+    let font = crate::typeface::font(weight);
     let chars =
         label.chars().map(|ch| text(ch.to_string()).size(size).color(color).font(font).into()).collect::<Vec<_>>();
     column(chars).spacing(size * tracking).align_x(Alignment::Center).into()
 }
 
 fn extra_bold() -> iced::Font {
-    iced::Font { weight: iced::font::Weight::ExtraBold, ..iced::Font::DEFAULT }
+    crate::typeface::font(iced::font::Weight::ExtraBold)
 }
 
 fn bold() -> iced::Font {
-    iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }
+    crate::typeface::font(iced::font::Weight::Bold)
 }
 
 fn fade(color: Color, opacity: f32) -> Color {

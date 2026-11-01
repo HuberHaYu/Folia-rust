@@ -65,6 +65,38 @@ impl<T> Queue<T> {
         self.items.get_mut(self.current?)
     }
 
+    /// `applyQueueAddBehavior` with `append`: the incoming items, each once and not the current one, go to the end;
+    /// copies already queued move there with them. The current item stays current. Returns how many were added.
+    pub fn append(&mut self, incoming: Vec<T>, same: impl Fn(&T, &T) -> bool) -> usize {
+        let mut targets: Vec<T> = Vec::new();
+        for item in incoming {
+            let is_current = self.current().is_some_and(|current| same(current, &item));
+            if !is_current && !targets.iter().any(|target| same(target, &item)) {
+                targets.push(item);
+            }
+        }
+        if targets.is_empty() {
+            return 0;
+        }
+        let current = self.current;
+        let mut kept = Vec::with_capacity(self.items.len() + targets.len());
+        let mut next_current = None;
+        for (index, item) in std::mem::take(&mut self.items).into_iter().enumerate() {
+            if Some(index) == current {
+                next_current = Some(kept.len());
+            } else if targets.iter().any(|target| same(target, &item)) {
+                continue;
+            }
+            kept.push(item);
+        }
+        let added = targets.len();
+        kept.extend(targets);
+        self.items = kept;
+        self.current = next_current;
+        self.origin = None;
+        added
+    }
+
     /// Makes `index` the current item.
     pub fn select(&mut self, index: usize) -> Option<&T> {
         if index >= self.items.len() {

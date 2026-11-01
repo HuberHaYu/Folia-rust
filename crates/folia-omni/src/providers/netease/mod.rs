@@ -12,8 +12,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, AudioSource, BoxFuture, Collection, CollectionKind, ExploreSection, LoginCode, LoginState, OmniError,
-    Page, Provider, RadioFeed,
+    Account, AudioSource, BoxFuture, Collection, CollectionDetail, CollectionKind, ExploreSection, LoginCode,
+    LoginState, OmniError, Page, Provider, RadioFeed,
 };
 
 const ID: &str = "netease";
@@ -22,6 +22,7 @@ const LEVEL: &str = "exhigh";
 
 pub struct Netease {
     client: eapi::Client,
+    explore: std::sync::Mutex<explore::Memory>,
 }
 
 #[derive(Deserialize)]
@@ -94,7 +95,7 @@ struct LyricText {
 
 impl Netease {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { client: eapi::Client::new(http) }
+        Self { client: eapi::Client::new(http), explore: std::sync::Mutex::default() }
     }
 
     /// Posts to the client API with the session, so signed-in songs resolve, and decodes a code-200 answer.
@@ -185,8 +186,19 @@ impl Provider for Netease {
         Box::pin(library::user_playlists(&self.client, user))
     }
 
-    fn collection_tracks<'a>(&'a self, collection: &'a Collection) -> BoxFuture<'a, Result<Vec<Track>, OmniError>> {
-        Box::pin(library::collection_tracks(&self.client, collection))
+    fn collection_detail<'a>(
+        &'a self,
+        collection: &'a Collection,
+    ) -> BoxFuture<'a, Result<CollectionDetail, OmniError>> {
+        Box::pin(library::collection_detail(&self.client, collection))
+    }
+
+    fn set_subscribed<'a>(
+        &'a self,
+        collection: &'a Collection,
+        subscribed: bool,
+    ) -> BoxFuture<'a, Result<(), OmniError>> {
+        Box::pin(library::set_subscribed(&self.client, collection, subscribed))
     }
 
     fn favorite_albums(&self) -> BoxFuture<'_, Result<Vec<Collection>, OmniError>> {
@@ -198,7 +210,14 @@ impl Provider for Netease {
     }
 
     fn explore(&self) -> BoxFuture<'_, Result<Vec<ExploreSection>, OmniError>> {
-        Box::pin(explore::first_page(&self.client))
+        Box::pin(explore::first_page(&self.client, &self.explore))
+    }
+
+    /// `getSizedCoverUrl` for `126.net`: the query is replaced by `param=<px>y<px>`.
+    fn sized_cover(&self, url: &str, px: u32) -> Option<String> {
+        let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+        let host = rest.split('/').next()?;
+        host.contains("126.net").then(|| format!("{}?param={px}y{px}", url.split(['?', '#']).next().unwrap_or(url)))
     }
 }
 

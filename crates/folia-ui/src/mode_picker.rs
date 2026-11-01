@@ -389,7 +389,7 @@ impl Pickers {
         let caption = text(label)
             .size(12)
             .line_height(iced::Pixels(18.0))
-            .font(iced::Font { weight, ..iced::Font::DEFAULT })
+            .font(crate::typeface::font(weight))
             .color(fade(ink))
             .wrapping(iced::widget::text::Wrapping::None);
         let body =

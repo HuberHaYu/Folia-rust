@@ -24,10 +24,14 @@ use crate::settings_kit::Tokens;
 const WIDTH: f32 = 772.0;
 const MARGIN: f32 = 16.0;
 const REST_HEIGHT: f32 = 420.0;
+/// The open details' share of the window (`Unfold` under the tile and the message).
+const DETAILS_HEIGHT: f32 = 140.0;
 const ASIDE: f32 = 212.0;
 const TILE: f32 = 200.0;
 /// Where the tile's centre is in the wide window: rings leave from here.
 const TILE_CENTER: Point = Point::new(ASIDE + 24.0 + TILE / 2.0, 130.0 + TILE / 2.0);
+/// `SEARCH_FROM`: the column has a search field from this many platforms on.
+const SEARCH_FROM: usize = 12;
 /// `PROVIDER_LOGIN_POLL_INTERVAL_MS`, `PROVIDER_LOGIN_TRANSIENT_POLL_LIMIT`, `PROVIDER_LOGIN_SCANNED_LIMIT_MS`.
 const POLL: Duration = Duration::from_millis(2000);
 const TRANSIENT_LIMIT: u32 = 2;
@@ -42,8 +46,8 @@ const EASE_IN_OUT: Ease = Ease::new(0.65, 0.0, 0.35, 1.0);
 const DONE_FRONT: f64 = 110.0;
 const DONE_LEAVE: f64 = 1260.0;
 const DONE_END: f64 = 1800.0;
-const SEMIBOLD: Font = Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT };
-const MEDIUM: Font = Font { weight: iced::font::Weight::Medium, ..Font::DEFAULT };
+const SEMIBOLD: Font = crate::typeface::font(iced::font::Weight::Semibold);
+const MEDIUM: Font = crate::typeface::font(iced::font::Weight::Medium);
 
 /// `LoginCaseId`s a QR sign-in can end in, with their class (`LoginCaseKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +91,49 @@ impl Case {
     fn expired_code(self) -> bool {
         matches!(self, Case::CodeExpired | Case::ExpiredAfterScan)
     }
+
+    /// The case's id and `LOGIN_KIND_TEXTS` for its class, as the details' kind row writes them.
+    fn kind(self) -> (&'static str, &'static str) {
+        match self {
+            Case::CodeExpired => ("code-expired", "login.kindUnfinished"),
+            Case::ExpiredAfterScan => ("expired-after-scan", "login.kindUnfinished"),
+            Case::Unreachable => ("unreachable", "login.kindUnreachable"),
+            Case::NoAnswer => ("no-answer", "login.kindUnreachable"),
+            Case::Refused => ("refused", "login.kindRefused"),
+            Case::RetryLater => ("retry-later", "login.kindRefused"),
+            Case::AccountNotRead => ("account-not-read", "login.kindAccount"),
+            Case::Unknown => ("unknown", "login.kindUnknown"),
+        }
+    }
+
+    /// `CASES[id].details`: every case but an expired code has details.
+    fn details(self) -> bool {
+        self != Case::CodeExpired
+    }
 }
+
+/// `LoginStep`: where in a QR sign-in it stopped (`loginStepText`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Start,
+    Wait,
+    Check,
+    Account,
+}
+
+impl Step {
+    fn text(self) -> &'static str {
+        match self {
+            Step::Start => "login.stepStartCode",
+            Step::Wait => "login.stepWaitPhone",
+            Step::Check => "login.stepCheck",
+            Step::Account => "login.stepAccount",
+        }
+    }
+}
+
+/// `DEFAULT_RETRY_WAIT_MS`: how long 「稍后再试」 waits when the platform names no time.
+const RETRY_WAIT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tone {
@@ -101,16 +147,25 @@ enum Tone {
 pub struct Failure {
     case: Case,
     quote: Option<(String, Option<String>)>,
+    step: Step,
+    /// The platform's code, the HTTP status and the error's words, as the details' raw row writes them.
+    raw: String,
+    at: Instant,
 }
 
 impl Failure {
-    fn of(case: Case) -> Self {
-        Self { case, quote: None }
+    fn of(case: Case, step: Step) -> Self {
+        Self { case, quote: None, step, raw: String::new(), at: Instant::now() }
+    }
+
+    /// `retryOpensAt`: a wait-then-retry case opens its retry `RETRY_WAIT` after it failed.
+    fn retry_opens(&self) -> Instant {
+        if self.case == Case::RetryLater { self.at + RETRY_WAIT } else { self.at }
     }
 
     /// `caseIdOf` for an error thrown while starting or checking: HTTP 429, 5xx, 4xx, a network error, or the platform's code.
-    fn from_error(err: &OmniError) -> Self {
-        match err {
+    fn from_error(err: &OmniError, step: Step) -> Self {
+        let (case, quote) = match err {
             OmniError::Http(http) => {
                 let case = match http.status().map(|status| status.as_u16()) {
                     Some(429) => Case::RetryLater,
@@ -120,12 +175,13 @@ impl Failure {
                     None => Case::Unreachable,
                 };
                 let code = http.status().map(|status| format!("HTTP {}", status.as_u16()));
-                Self { case, quote: code.map(|code| (code, None)) }
+                (case, code.map(|code| (code, None)))
             }
-            OmniError::Platform(code) => Self { case: Case::Refused, quote: Some((code.to_string(), None)) },
-            OmniError::Response(message) => Self { case: Case::Refused, quote: Some((message.clone(), None)) },
-            _ => Self { case: Case::Unknown, quote: Some((err.to_string(), None)) },
-        }
+            OmniError::Platform(code) => (Case::Refused, Some((code.to_string(), None))),
+            OmniError::Response(message) => (Case::Refused, Some((message.clone(), None))),
+            _ => (Case::Unknown, Some((err.to_string(), None))),
+        };
+        Self { case, quote, step, raw: crate::background::error_chain(err), at: Instant::now() }
     }
 
     fn network(err: &OmniError) -> bool {
@@ -148,8 +204,12 @@ enum Phase {
 pub enum Message {
     Choose(&'static str),
     Hover(Option<&'static str>),
+    /// The platform search above twelve rows or more (`SEARCH_FROM`).
+    Query(String),
     Close,
     Retry,
+    /// Opens or closes a failure's details.
+    Details,
     /// The account's sign-out: asks first (`askProviderSignOut`).
     SignOut,
     ConfirmSignOut,
@@ -182,8 +242,16 @@ pub struct Login {
     done_at: Option<Instant>,
     clock: Instant,
     hover: Option<&'static str>,
+    /// The platforms in the column's order, read when the window opens.
+    rows: Vec<Platform>,
+    query: String,
+    /// Which row the highlight block stands on, sliding between rows (`st-t-move`).
+    slide: Tween,
+    slide_shown: bool,
     /// The sign-out question is open over the window.
     asking: bool,
+    /// A failure's details are open.
+    details: bool,
 }
 
 /// What the window draws with.
@@ -214,7 +282,12 @@ impl Login {
             done_at: None,
             clock: now,
             hover: None,
+            rows: Vec::new(),
+            query: String::new(),
+            slide: Tween::new(0.0, MOVE_MS, EASE_OUT, now),
+            slide_shown: false,
             asking: false,
+            details: false,
         }
     }
 
@@ -232,6 +305,10 @@ impl Login {
         self.qr = None;
         self.done_at = None;
         self.round += 1;
+        self.rows = omni.map(Omni::platforms).unwrap_or_default();
+        self.query.clear();
+        self.hover = None;
+        self.slide_shown = false;
         match provider {
             Some(provider) => self.choose(provider, signed_in, omni),
             None => Task::none(),
@@ -247,10 +324,12 @@ impl Login {
     }
 
     pub fn animating(&self, now: Instant) -> bool {
-        if self.shown.running(now) || self.done_at.is_some() {
+        if self.shown.running(now) || self.done_at.is_some() || self.slide.running(now) {
             return true;
         }
-        self.open && matches!(self.phase, Phase::Preparing | Phase::Code | Phase::Reading | Phase::Scanned)
+        let counting = matches!(&self.phase, Phase::Failed(failure) if now < failure.retry_opens());
+        self.open
+            && (counting || matches!(self.phase, Phase::Preparing | Phase::Code | Phase::Reading | Phase::Scanned))
     }
 
     /// Follows the account after a confirmed code: read means done, nobody means the account was not read.
@@ -260,7 +339,7 @@ impl Login {
         }
         match account {
             AccountState::SignedIn(_) => self.done_at = Some(Instant::now()),
-            AccountState::Guest { .. } => self.phase = Phase::Failed(Failure::of(Case::AccountNotRead)),
+            AccountState::Guest { .. } => self.fail(Failure::of(Case::AccountNotRead, Step::Account)),
             AccountState::Resolving => {}
         }
     }
@@ -280,6 +359,13 @@ impl Login {
             }
             Message::Hover(provider) => {
                 self.hover = provider;
+                self.sync_slide();
+                (Task::none(), None)
+            }
+            Message::Query(query) => {
+                self.query = query;
+                self.hover = None;
+                self.sync_slide();
                 (Task::none(), None)
             }
             Message::Close if self.asking => {
@@ -290,8 +376,13 @@ impl Login {
                 self.close();
                 (Task::none(), None)
             }
+            Message::Details => {
+                self.details = !self.details;
+                (Task::none(), None)
+            }
             Message::Retry => {
-                if signed_in {
+                let waiting = matches!(&self.phase, Phase::Failed(failure) if Instant::now() < failure.retry_opens());
+                if signed_in || waiting {
                     return (Task::none(), None);
                 }
                 (self.start(omni), None)
@@ -317,7 +408,7 @@ impl Login {
                 }
                 Err(failure) => {
                     tracing::warn!(case = ?failure.case, "sign-in code unavailable");
-                    self.phase = Phase::Failed(failure);
+                    self.fail(failure);
                     (Task::none(), None)
                 }
             },
@@ -344,6 +435,7 @@ impl Login {
 
     fn choose(&mut self, provider: &'static str, signed_in: bool, omni: Option<&Omni>) -> Task<Message> {
         self.chosen = Some(provider);
+        self.sync_slide();
         self.qr = None;
         self.round += 1;
         if signed_in {
@@ -351,6 +443,36 @@ impl Login {
             return Task::none();
         }
         self.start(omni)
+    }
+
+    /// The rows the column shows: all of them, or those whose names hold the search words once there are twelve.
+    fn shown_rows(&self) -> Vec<Platform> {
+        let wanted = self.query.trim().to_lowercase();
+        if self.rows.len() < SEARCH_FROM || wanted.is_empty() {
+            return self.rows.clone();
+        }
+        let matches =
+            |row: &&Platform| format!("{}\n{}", row.short_name, row.display_name).to_lowercase().contains(&wanted);
+        self.rows.iter().filter(matches).copied().collect()
+    }
+
+    /// The highlighted row: the one pointed at, else the chosen one (`lit`).
+    fn lit(&self, rows: &[Platform]) -> Option<usize> {
+        let at = |id: Option<&'static str>| id.and_then(|id| rows.iter().position(|row| row.id == id));
+        at(self.hover).or_else(|| at(self.chosen))
+    }
+
+    /// Slides the highlight to the lit row; the first one it lands on it simply appears on.
+    fn sync_slide(&mut self) {
+        let rows = self.shown_rows();
+        let Some(index) = self.lit(&rows) else { return };
+        let now = Instant::now();
+        if self.slide_shown {
+            self.slide.set(index as f32, now);
+        } else {
+            self.slide = Tween::new(index as f32, MOVE_MS, EASE_OUT, now);
+            self.slide_shown = true;
+        }
     }
 
     /// Asks for a new code (`startLogin` + `createQr`).
@@ -361,19 +483,27 @@ impl Login {
         self.scanned_at = None;
         self.transient = 0;
         let Some(omni) = omni.cloned() else {
-            self.phase = Phase::Failed(Failure::of(Case::Unknown));
+            self.fail(Failure::of(Case::Unknown, Step::Start));
             return Task::none();
         };
         let round = self.round;
-        let work = async move { omni.login_qr(PROVIDER).await.map_err(|err| Failure::from_error(&err)) };
+        let work = async move { omni.login_qr(PROVIDER).await.map_err(|err| Failure::from_error(&err, Step::Start)) };
         Task::perform(work, move |result| Message::Qr(round, result))
+    }
+
+    /// A new failure closes the details (`sceneKey` changed).
+    fn fail(&mut self, failure: Failure) {
+        self.details = false;
+        self.phase = Phase::Failed(failure);
     }
 
     fn check(&self, omni: Option<&Omni>) -> Task<Message> {
         let (Some(omni), Some(qr)) = (omni.cloned(), self.qr.as_ref()) else { return Task::none() };
         let (round, key) = (self.round, qr.key.clone());
         let work = async move {
-            omni.check_login(PROVIDER, &key).await.map_err(|err| (Failure::from_error(&err), Failure::network(&err)))
+            omni.check_login(PROVIDER, &key)
+                .await
+                .map_err(|err| (Failure::from_error(&err, Step::Check), Failure::network(&err)))
         };
         Task::perform(work, move |result| Message::Checked(round, result))
     }
@@ -387,7 +517,7 @@ impl Login {
                 return (self.next_poll(), None);
             }
             Err((failure, _)) => {
-                self.phase = Phase::Failed(failure);
+                self.fail(failure);
                 return (Task::none(), None);
             }
         };
@@ -401,7 +531,7 @@ impl Login {
             LoginState::Scanned => {
                 let at = *self.scanned_at.get_or_insert_with(Instant::now);
                 if at.elapsed() >= SCANNED_LIMIT {
-                    self.phase = Phase::Failed(Failure::of(Case::ExpiredAfterScan));
+                    self.fail(Failure::of(Case::ExpiredAfterScan, Step::Wait));
                     return (Task::none(), None);
                 }
                 self.phase = Phase::Scanned;
@@ -413,12 +543,17 @@ impl Login {
             }
             LoginState::Expired => {
                 let case = if self.scanned_at.is_some() { Case::ExpiredAfterScan } else { Case::CodeExpired };
-                self.phase = Phase::Failed(Failure::of(case));
+                self.fail(Failure::of(case, Step::Wait));
                 (Task::none(), None)
             }
             LoginState::Failed { code, message } => {
+                let raw = [Some(format!("code {code}")), message.clone()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
                 let quote = message.map_or_else(|| (code.to_string(), None), |text| (text, Some(code.to_string())));
-                self.phase = Phase::Failed(Failure { case: Case::Refused, quote: Some(quote) });
+                self.fail(Failure { quote: Some(quote), raw, ..Failure::of(Case::Refused, Step::Check) });
                 (Task::none(), None)
             }
         }
@@ -461,33 +596,35 @@ impl Login {
             let rings = matches!(self.phase, Phase::Code) && done.is_none();
             sheet_layers = sheet_layers.push(
                 canvas_widget(Underlay { pc, rings, clock: self.clock, opacity })
-                    .width(Length::Fixed(width))
-                    .height(Length::Fixed(REST_HEIGHT)),
+                    .width(Length::Fixed(width - 2.0))
+                    .height(Length::Fixed(self.rest_height(signed_in))),
             );
         }
         sheet_layers = sheet_layers.push(content);
         if let (Some(ms), Some(platform)) = (done, platform) {
             sheet_layers = sheet_layers.push(flood(&look, platform, ms, opacity, narrow));
         }
-        // The window's ring paints over the column, which cannot be clipped to the rounded corners.
-        let line2 = tokens.line2;
-        sheet_layers = sheet_layers.push(container(space()).width(Length::Fill).height(Length::Fill).style(
-            move |_theme: &Theme| container::Style {
-                border: Border { radius: 16.0.into(), width: 1.0, color: line2 },
-                ..container::Style::default()
-            },
-        ));
         let shadow = Color { a: if look.daylight { 0.26 } else { 0.6 } * opacity, ..Color::BLACK };
-        let sheet = container(sheet_layers).width(Length::Fixed(width)).height(Length::Shrink).clip(true).style(
+        let sheet = container(sheet_layers).width(Length::Fixed(width - 2.0)).height(Length::Shrink).clip(true).style(
             move |_theme: &Theme| container::Style {
                 background: Some(Background::Color(tokens.win)),
                 border: Border { radius: 16.0.into(), ..Border::default() },
-                shadow: Shadow { color: shadow, offset: Vector::new(0.0, 36.0), blur_radius: 90.0 },
                 ..container::Style::default()
             },
         );
+        // `0 0 0 1px var(--st-line2)` is a ring outside the window: drawn as a 1px wider plate behind it.
+        let line2 = tokens.line2;
+        let sheet = container(sheet).padding(1).style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(line2)),
+            border: Border { radius: 17.0.into(), ..Border::default() },
+            shadow: Shadow { color: shadow, offset: Vector::new(0.0, 36.0), blur_radius: 90.0 },
+            ..container::Style::default()
+        });
         let scale = if leaving > 0.0 { 1.0 + 0.08 * leaving } else { 0.9 + 0.1 * shown };
-        let sheet = iced::widget::float(mouse_area(sheet).on_press(Message::Swallow)).scale(scale);
+        let sheet = mouse_area(sheet).on_press(Message::Swallow);
+        // Scaling lifts a subtree to the top layer in iced, so it is only scaled while it moves.
+        let sheet: Element<'a, Message> =
+            if (scale - 1.0).abs() > 0.0005 { iced::widget::float(sheet).scale(scale).into() } else { sheet.into() };
         let top = MARGIN.max(look.window.height / 2.0 - REST_HEIGHT / 2.0);
         let placed = container(sheet)
             .width(Length::Fill)
@@ -561,13 +698,18 @@ impl Login {
         let shadow = Color { a: if look.daylight { 0.26 } else { 0.6 } * tokens.t1.a, ..Color::BLACK };
         let line2 = tokens.line2;
         let sheet = container(body.push(footer))
-            .width(Length::Fixed(400.0_f32.min(look.window.width - 2.0 * MARGIN)))
+            .width(Length::Fixed(398.0_f32.min(look.window.width - 2.0 * MARGIN - 2.0)))
             .style(move |_theme: &Theme| container::Style {
                 background: Some(Background::Color(tokens.win)),
-                border: Border { radius: 16.0.into(), width: 1.0, color: line2 },
-                shadow: Shadow { color: shadow, offset: Vector::new(0.0, 36.0), blur_radius: 90.0 },
+                border: Border { radius: 16.0.into(), ..Border::default() },
                 ..container::Style::default()
             });
+        let sheet = container(sheet).padding(1).style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(line2)),
+            border: Border { radius: 17.0.into(), ..Border::default() },
+            shadow: Shadow { color: shadow, offset: Vector::new(0.0, 36.0), blur_radius: 90.0 },
+            ..container::Style::default()
+        });
         let scrim_color =
             if look.daylight { Color::from_rgba8(24, 18, 12, 0.36) } else { Color { a: 0.52, ..Color::BLACK } };
         let scrim =
@@ -626,25 +768,32 @@ impl Login {
                 .padding(Padding { top: 16.0, right: 16.0, bottom: 0.0, left: 24.0 });
 
         let tile = self.tile(look, tokens, platform, signed_in, now);
-        let message = self.message(look, tokens, platform, signed_in);
+        let message = self.message(look, tokens, platform, signed_in, now);
         let main: Element<'a, Message> = if narrow {
             column![
                 header,
-                container(self.platforms(look, tokens, true)).padding([0.0, 16.0]),
+                container(self.platforms(look, tokens, true, now)).padding([0.0, 16.0]),
                 container(tile).center_x(Length::Fill),
                 container(message).padding(Padding { top: 0.0, right: 24.0, bottom: 20.0, left: 24.0 }),
             ]
             .spacing(16)
             .into()
         } else {
-            let body =
-                row![tile, message].spacing(24).padding(Padding { top: 82.0, right: 24.0, bottom: 24.0, left: 24.0 });
+            let mut body = column![row![tile, message].spacing(24)].padding(Padding {
+                top: 82.0,
+                right: 24.0,
+                bottom: 24.0,
+                left: 24.0,
+            });
+            if let (Phase::Failed(failure), true) = (&self.phase, self.details_shown(signed_in)) {
+                body = body.push(details(look, tokens, label, failure));
+            }
             column![header, body].into()
         };
         if narrow {
             return main;
         }
-        let aside = container(self.platforms(look, tokens, false))
+        let aside = container(self.platforms(look, tokens, false, now))
             .width(Length::Fixed(ASIDE))
             .height(Length::Fill)
             .padding(8)
@@ -659,24 +808,110 @@ impl Login {
         let rule = container(space()).width(Length::Fixed(1.0)).height(Length::Fill).style(move |_theme: &Theme| {
             container::Style { background: Some(Background::Color(tokens.line)), ..container::Style::default() }
         });
-        row![aside, rule, container(main).width(Length::Fill)].height(Length::Fixed(REST_HEIGHT)).into()
+        row![aside, rule, container(main).width(Length::Fill)].height(Length::Fixed(self.rest_height(signed_in))).into()
     }
 
-    /// `PlatformColumn`: one row a platform, the chosen one marked with a bar of its colour; unconfigured rows are grey.
-    fn platforms<'a>(&'a self, look: &Look<'a>, tokens: Tokens, lie: bool) -> Element<'a, Message> {
+    /// `PlatformColumn`: one row a platform in the column's order; a block slides to the row pointed at or chosen,
+    /// the chosen row has a 3px bar of its colour at its left edge, and unconfigured rows are grey.
+    fn platforms<'a>(&'a self, look: &Look<'a>, tokens: Tokens, lie: bool, now: Instant) -> Element<'a, Message> {
         let i18n = look.i18n;
-        let count = look.platforms.len().max(1) as f32;
-        let height = ((REST_HEIGHT - 16.0) / count).clamp(46.0, 68.0);
-        let rows = look.platforms.iter().map(|platform| {
-            let platform = *platform;
-            let chosen = self.chosen == Some(platform.id);
-            let lit = chosen || self.hover == Some(platform.id);
-            let off = !platform.available;
-            let signed_in = platform.id == PROVIDER && matches!(look.account, AccountState::SignedIn(_));
-            let ran_out = platform.id == PROVIDER && matches!(look.account, AccountState::Guest { ran_out: true });
-            let dim = if off { 0.42 } else { 1.0 };
-            let color = if lit { tokens.t1 } else { tokens.t2 };
-            let color = Color { a: color.a * dim, ..color };
+        let rows = self.shown_rows();
+        let searching = self.rows.len() >= SEARCH_FROM;
+        // `ROW_SIZE`: rows share the column's height, each 46 to 68 high.
+        let room = REST_HEIGHT - 16.0 - if searching { 38.0 } else { 0.0 };
+        let height = if lie { 36.0 } else { (room / rows.len().max(1) as f32).clamp(46.0, 68.0) };
+        let lit = self.lit(&rows);
+        let lit_id = lit.and_then(|index| rows.get(index)).map(|row| row.id);
+        let items = rows.iter().map(|&platform| {
+            let bright = self.chosen == Some(platform.id) || lit_id == Some(platform.id);
+            self.platform_row(look, tokens, platform, lie, height, bright)
+        });
+        let list: Element<'a, Message> = if lie {
+            iced::widget::scrollable(row(items).spacing(4))
+                .direction(iced::widget::scrollable::Direction::Horizontal(
+                    iced::widget::scrollable::Scrollbar::new().width(0).scroller_width(0),
+                ))
+                .into()
+        } else if rows.is_empty() {
+            container(text(i18n.t("login.noPlatformMatch")).size(13).color(tokens.t3))
+                .padding([24.0, 0.0])
+                .center_x(Length::Fill)
+                .into()
+        } else {
+            let fill2 = tokens.fill2;
+            let block: Element<'a, Message> = match lit {
+                Some(_) => column![
+                    space().height(Length::Fixed(self.slide.value(now) * height)),
+                    container(space()).width(Length::Fill).height(Length::Fixed(height)).style(
+                        move |_theme: &Theme| {
+                            container::Style {
+                                background: Some(Background::Color(fill2)),
+                                border: Border { radius: 8.0.into(), ..Border::default() },
+                                ..container::Style::default()
+                            }
+                        }
+                    ),
+                ]
+                .into(),
+                None => space().into(),
+            };
+            let total = height * rows.len() as f32;
+            stack![container(block).width(Length::Fill).height(Length::Fixed(total)), column(items).width(Length::Fill)]
+                .into()
+        };
+        if !searching {
+            return list;
+        }
+        let field = iced::widget::text_input(i18n.t("login.searchPlatforms"), &self.query)
+            .on_input(Message::Query)
+            .size(13)
+            .padding(0)
+            .style(move |_theme: &Theme, _status| iced::widget::text_input::Style {
+                background: Background::Color(Color::TRANSPARENT),
+                border: Border::default(),
+                icon: tokens.t3,
+                placeholder: tokens.t3,
+                value: tokens.t1,
+                selection: tokens.fill2,
+            });
+        let fill = tokens.fill;
+        let search = container(row![icon(Icon::Search, 14.0, tokens.t3), field].spacing(8).align_y(Alignment::Center))
+            .height(Length::Fixed(32.0))
+            .padding([0.0, 10.0])
+            .align_y(Alignment::Center)
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(Background::Color(fill)),
+                border: Border { radius: 8.0.into(), ..Border::default() },
+                ..container::Style::default()
+            });
+        column![search, list].spacing(6).into()
+    }
+
+    fn platform_row<'a>(
+        &'a self,
+        look: &Look<'a>,
+        tokens: Tokens,
+        platform: Platform,
+        lie: bool,
+        height: f32,
+        bright: bool,
+    ) -> Element<'a, Message> {
+        let i18n = look.i18n;
+        let chosen = self.chosen == Some(platform.id);
+        let off = !platform.available;
+        let signed_in = platform.id == PROVIDER && matches!(look.account, AccountState::SignedIn(_));
+        let ran_out = platform.id == PROVIDER && matches!(look.account, AccountState::Guest { ran_out: true });
+        let dim = if off { 0.42 } else { 1.0 };
+        let fade = |color: Color| Color { a: color.a * dim, ..color };
+        let color = fade(if bright { tokens.t1 } else { tokens.t2 });
+        let mut face = row![].spacing(if lie { 10 } else { 12 }).align_y(Alignment::Center);
+        face = face.push(mark_faded(platform, if lie { 22.0 } else { 30.0 }, dim * tokens.t1.a));
+        if lie {
+            face = face.push(
+                container(text(platform.short_name).size(13).color(color).wrapping(iced::widget::text::Wrapping::None))
+                    .max_width(120.0),
+            );
+        } else {
             let note: Element<'a, Message> = if signed_in {
                 let name = match look.account {
                     AccountState::SignedIn(account) => account.nickname.clone(),
@@ -689,16 +924,51 @@ impl Login {
                     .align_y(Alignment::Center)
                     .into()
             } else {
-                let (key, color) = if ran_out {
+                let (key, note) = if ran_out {
                     ("login.rowRanOut", warn(look.daylight))
                 } else if off {
-                    ("home.providerNotConfigured", Color { a: tokens.t3.a * dim, ..tokens.t3 })
+                    ("home.providerNotConfigured", fade(tokens.t3))
                 } else {
                     ("login.rowSignedOut", tokens.t3)
                 };
-                text(i18n.t(key)).size(11.5).color(color).wrapping(iced::widget::text::Wrapping::None).into()
+                text(i18n.t(key)).size(11.5).color(note).wrapping(iced::widget::text::Wrapping::None).into()
             };
-            let pc = folia_visualizer::color(Rgb::hex(platform.color), if chosen { 1.0 } else { 0.0 });
+            let names = column![
+                text(platform.short_name)
+                    .size(13)
+                    .font(MEDIUM)
+                    .color(color)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                note
+            ]
+            .spacing(2);
+            face = face.push(container(names).width(Length::Fill).clip(true));
+        }
+        if let (true, Some(avatar)) = (signed_in, look.avatar) {
+            let size = if lie { 18.0 } else { 24.0 };
+            face = face.push(
+                iced::widget::image(avatar.clone())
+                    .width(Length::Fixed(size))
+                    .height(Length::Fixed(size))
+                    .border_radius(size / 2.0),
+            );
+        }
+        let fill2 = tokens.fill2;
+        let row_button = button(container(face).height(Length::Fill).align_y(Alignment::Center))
+            .width(if lie { Length::Shrink } else { Length::Fill })
+            .height(Length::Fixed(height))
+            .padding(if lie { Padding::from([0.0, 8.0]) } else { Padding::from([0.0, 10.0]) })
+            .on_press_maybe((!off).then_some(Message::Choose(platform.id)))
+            .style(move |_theme: &Theme, _status| button::Style {
+                background: (lie && bright).then_some(Background::Color(fill2)),
+                border: Border { radius: 8.0.into(), ..Border::default() },
+                ..button::Style::default()
+            });
+        let item: Element<'a, Message> = if lie {
+            row_button.into()
+        } else {
+            // The chosen row's bar sits on the row's left edge, over its padding.
+            let pc = folia_visualizer::color(Rgb::hex(platform.color), if chosen { tokens.t1.a } else { 0.0 });
             let bar = container(space()).width(Length::Fixed(3.0)).height(Length::Fixed(height * 0.38)).style(
                 move |_theme: &Theme| container::Style {
                     background: Some(Background::Color(pc)),
@@ -706,59 +976,22 @@ impl Login {
                     ..container::Style::default()
                 },
             );
-            let mut face = row![].spacing(if lie { 10 } else { 12 }).align_y(Alignment::Center);
-            if !lie {
-                face = face.push(bar);
-            }
-            face = face.push(mark_faded(platform, if lie { 22.0 } else { 30.0 }, dim * tokens.t1.a));
-            if lie {
-                face = face.push(text(platform.short_name).size(13).color(color));
-            } else {
-                let names = column![text(platform.short_name).size(13).font(MEDIUM).color(color), note].spacing(2);
-                face = face.push(container(names).width(Length::Fill));
-                if let (true, Some(avatar)) = (signed_in, look.avatar) {
-                    face = face.push(
-                        iced::widget::image(avatar.clone())
-                            .width(Length::Fixed(24.0))
-                            .height(Length::Fixed(24.0))
-                            .border_radius(12.0),
-                    );
-                }
-            }
-            let row_button = button(face)
-                .width(if lie { Length::Shrink } else { Length::Fill })
-                .height(Length::Fixed(if lie { 36.0 } else { height }))
-                .padding(if lie { Padding::from([0.0, 8.0]) } else { Padding::from([0.0, 10.0]).left(0.0) })
-                .on_press_maybe((!off).then_some(Message::Choose(platform.id)))
-                .style(move |_theme: &Theme, _status| button::Style {
-                    background: lit.then_some(Background::Color(tokens.fill2)),
-                    border: Border { radius: 8.0.into(), ..Border::default() },
-                    ..button::Style::default()
-                });
-            let id = platform.id;
-            let hovered: Element<'a, Message> = mouse_area(row_button)
-                .on_enter(if off { Message::Swallow } else { Message::Hover(Some(id)) })
-                .on_exit(Message::Hover(None))
-                .into();
-            if off {
-                iced::widget::Tooltip::new(
-                    hovered,
-                    text(i18n.t("home.providerNotConfigured")).size(12),
-                    iced::widget::tooltip::Position::Right,
-                )
-                .into()
-            } else {
-                hovered
-            }
-        });
-        if lie {
-            iced::widget::scrollable(row(rows).spacing(4))
-                .direction(iced::widget::scrollable::Direction::Horizontal(
-                    iced::widget::scrollable::Scrollbar::new().width(0).scroller_width(0),
-                ))
-                .into()
+            stack![row_button, container(bar).height(Length::Fixed(height)).align_y(Alignment::Center)].into()
+        };
+        let id = platform.id;
+        let hovered: Element<'a, Message> = mouse_area(item)
+            .on_enter(if off { Message::Swallow } else { Message::Hover(Some(id)) })
+            .on_exit(Message::Hover(None))
+            .into();
+        if off {
+            iced::widget::Tooltip::new(
+                hovered,
+                text(i18n.t("home.providerNotConfigured")).size(12),
+                iced::widget::tooltip::Position::Right,
+            )
+            .into()
         } else {
-            column(rows).width(Length::Fill).into()
+            hovered
         }
     }
 
@@ -889,6 +1122,7 @@ impl Login {
         tokens: Tokens,
         platform: Option<Platform>,
         signed_in: bool,
+        now: Instant,
     ) -> Element<'a, Message> {
         let i18n = look.i18n;
         let label = platform.map(|platform| platform.short_name).unwrap_or_default();
@@ -907,7 +1141,9 @@ impl Login {
                 let (title, line) = failure.case.texts();
                 note = line.map(|key| i18n.t(key).to_owned());
                 quote = failure.quote.clone();
-                actions.push((i18n.t("home.retryQr").to_owned(), true, Message::Retry));
+                if now >= failure.retry_opens() {
+                    actions.push((i18n.t("home.retryQr").to_owned(), true, Message::Retry));
+                }
                 i18n.format(title, &[("provider", label)])
             }
             (Phase::Scanned, Some(_)) => i18n.t("home.qrScanned").to_owned(),
@@ -958,8 +1194,18 @@ impl Login {
             );
         }
         let mut buttons = row![].spacing(8).align_y(Alignment::Center);
+        let failure = match &self.phase {
+            Phase::Failed(failure) if platform.is_some() && !signed_in => Some(failure),
+            _ => None,
+        };
+        if let Some(failure) = failure.filter(|failure| now < failure.retry_opens()) {
+            buttons = buttons.push(wait_button(i18n, failure, tokens, now));
+        }
         for (label, primary, message) in actions {
             buttons = buttons.push(kit_button(label, primary, message, tokens));
+        }
+        if failure.is_some_and(|failure| failure.case.details()) {
+            buttons = buttons.push(details_toggle(i18n, self.details, tokens));
         }
         buttons = buttons.push(space().width(Length::Fill));
         if let (Some(platform), Some(current)) = (platform, self.step()) {
@@ -978,6 +1224,18 @@ impl Login {
             let ms = now.saturating_duration_since(at).as_secs_f64() * 1000.0;
             part(ms, 0.0, 480.0, EASE_OUT)
         })
+    }
+
+    /// The window's height: the open details add their share under the tile and the message.
+    fn rest_height(&self, signed_in: bool) -> f32 {
+        if self.details_shown(signed_in) { REST_HEIGHT + DETAILS_HEIGHT } else { REST_HEIGHT }
+    }
+
+    fn details_shown(&self, signed_in: bool) -> bool {
+        self.details
+            && !signed_in
+            && self.chosen.is_some()
+            && matches!(&self.phase, Phase::Failed(failure) if failure.case.details())
     }
 
     /// `stepMarks` for a QR sign-in: code, phone, account.
@@ -1039,7 +1297,7 @@ fn mark_faded<'a>(platform: Platform, size: f32, alpha: f32) -> Element<'a, Mess
     container(
         text(platform.letter.to_string())
             .size((size * 0.42).round())
-            .font(Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT })
+            .font(crate::typeface::font(iced::font::Weight::Bold))
             .color(on),
     )
     .center(Length::Fixed(size))
@@ -1142,6 +1400,93 @@ fn kit_button<'a>(label: String, primary: bool, message: Message, tokens: Tokens
         .into()
 }
 
+/// `WaitButton`: counts down to the retry, its fill growing a step each second.
+fn wait_button<'a>(i18n: &I18n, failure: &Failure, tokens: Tokens, now: Instant) -> Element<'a, Message> {
+    let ends = failure.retry_opens();
+    let left = ends.saturating_duration_since(now).as_secs_f32();
+    let total = ends.saturating_duration_since(failure.at).as_secs_f32().ceil().max(1.0);
+    // `(total - left + 1) / total`, slid over each second as the width transition does.
+    let grown = ((total - left + 1.0) / total).clamp(0.0, 1.0);
+    let seconds = (left.ceil() as u32).to_string();
+    let label = text(i18n.format("login.retryIn", &[("seconds", seconds.as_str())])).size(13).color(tokens.t2);
+    let fill2 = tokens.fill2;
+    let bar = row![
+        container(space()).width(Length::FillPortion((grown * 1000.0) as u16)).height(Length::Fill).style(
+            move |_theme: &Theme| container::Style {
+                background: Some(Background::Color(fill2)),
+                ..container::Style::default()
+            }
+        ),
+        space().width(Length::FillPortion(((1.0 - grown) * 1000.0) as u16)),
+    ];
+    let fill = tokens.fill;
+    container(stack![container(label).height(Length::Fixed(32.0)).padding([0.0, 12.0]).align_y(Alignment::Center), bar])
+        .clip(true)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(fill)),
+            border: Border { radius: 8.0.into(), ..Border::default() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The details toggle: `login.details` and a chevron that turns over when open.
+fn details_toggle<'a>(i18n: &I18n, open: bool, tokens: Tokens) -> Element<'a, Message> {
+    let chevron = if open { Icon::ChevronUp } else { Icon::ChevronDown };
+    let face = row![text(i18n.t("login.details").to_owned()).size(13).color(tokens.t2), icon(chevron, 14.0, tokens.t2)]
+        .spacing(4)
+        .align_y(Alignment::Center);
+    button(container(face).height(Length::Fill).align_y(Alignment::Center))
+        .height(Length::Fixed(32.0))
+        .padding([0.0, 8.0])
+        .on_press(Message::Details)
+        .style(move |_theme: &Theme, status| button::Style {
+            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                .then_some(Background::Color(tokens.fill)),
+            border: Border { radius: 8.0.into(), ..Border::default() },
+            ..button::Style::default()
+        })
+        .into()
+}
+
+/// `LoginDetails`: the failure's facts, under a rule.
+fn details<'a>(look: &Look<'a>, tokens: Tokens, label: &str, failure: &Failure) -> Element<'a, Message> {
+    let i18n = look.i18n;
+    let (id, kind) = failure.case.kind();
+    let raw = if failure.raw.is_empty() { "—".to_owned() } else { failure.raw.clone() };
+    let facts = [
+        (i18n.t("login.factPlatform"), label.to_owned()),
+        (i18n.t("login.factStep"), i18n.t(failure.step.text()).to_owned()),
+        (i18n.t("login.factKind"), format!("{} · {id}", i18n.t(kind))),
+        (i18n.t("login.factRaw"), raw),
+    ];
+    // `grid-cols-[auto_minmax(0,1fr)]`: the names' column is as wide as the widest name.
+    let span = |name: &str| name.chars().map(|c| if c.is_ascii() { 6.6 } else { 12.0 }).sum::<f32>();
+    let name_width = facts.iter().map(|(name, _)| span(name)).fold(0.0, f32::max).ceil();
+    let leading = iced::widget::text::LineHeight::Absolute(20.0.into());
+    let rows = column(facts.into_iter().map(|(name, value)| {
+        row![
+            text(name.to_owned()).size(12).line_height(leading).color(tokens.t3).width(Length::Fixed(name_width)),
+            text(value).size(12).line_height(leading).font(Font::MONOSPACE).color(tokens.t2).width(Length::Fill),
+        ]
+        .spacing(16)
+        .into()
+    }))
+    .spacing(2);
+    let line = tokens.line;
+    let pv = tokens.fill;
+    let rule = container(space()).width(Length::Fill).height(Length::Fixed(1.0)).style(move |_theme: &Theme| {
+        container::Style { background: Some(Background::Color(line)), ..container::Style::default() }
+    });
+    let table =
+        container(rows).padding([10.0, 12.0]).width(Length::Fill).style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(pv)),
+            border: Border { radius: 8.0.into(), ..Border::default() },
+            ..container::Style::default()
+        });
+    column![rule, table].spacing(16).padding(Padding::ZERO.top(16.0)).into()
+}
+
 /// `StepMarks`: QR code, phone, account; done steps filled with the platform's colour.
 fn steps<'a>(current: usize, platform: Platform, tokens: Tokens) -> Element<'a, Message> {
     let pc = folia_visualizer::color(Rgb::hex(platform.color), tokens.t1.a);
@@ -1199,7 +1544,7 @@ fn flood<'a>(look: &Look<'a>, platform: Platform, ms: f64, opacity: f32, narrow:
     };
     let letter = text(platform.letter.to_string())
         .size(196)
-        .font(Font { weight: iced::font::Weight::ExtraBold, ..Font::DEFAULT })
+        .font(crate::typeface::font(iced::font::Weight::ExtraBold))
         .color(Color { a: 0.10 * watermark, ..on });
     let watermark = container(iced::widget::float(letter).translate(move |_, _| Vector::new(24.0 * drift, 0.0)))
         .width(Length::Fill)
@@ -1219,7 +1564,7 @@ fn flood<'a>(look: &Look<'a>, platform: Platform, ms: f64, opacity: f32, narrow:
             container(
                 text(platform.letter.to_string())
                     .size(37)
-                    .font(Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT })
+                    .font(crate::typeface::font(iced::font::Weight::Bold))
                     .color(Color { a: picture_in, ..on }),
             )
             .center(Length::Fixed(88.0))

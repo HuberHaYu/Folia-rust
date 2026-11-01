@@ -269,12 +269,8 @@ fn letter_widths() -> [f32; 5] {
 }
 
 fn face_font(family: Family, weight: Weight, italic: bool) -> Font {
-    Font {
-        family,
-        weight,
-        style: if italic { iced::font::Style::Italic } else { iced::font::Style::Normal },
-        ..Font::DEFAULT
-    }
+    let style = if italic { iced::font::Style::Italic } else { iced::font::Style::Normal };
+    crate::typeface::with(Font { family, style, ..Font::DEFAULT }, weight)
 }
 
 pub(crate) struct SplashProgram<'a> {

@@ -273,5 +273,5 @@ fn close_button<'a>(ink: Color, daylight: bool, shown: f32) -> Element<'a, Messa
 }
 
 fn medium() -> iced::Font {
-    iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::DEFAULT }
+    crate::typeface::font(iced::font::Weight::Medium)
 }

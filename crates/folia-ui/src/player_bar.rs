@@ -41,8 +41,8 @@ const FADE_MS: f64 = 200.0;
 const TONE_MS: f64 = 300.0;
 /// Play button `transition-transform`, Tailwind's 150ms.
 const SCALE_MS: f64 = 150.0;
-const TITLE_FONT: Font = Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT };
-const TIME_FONT: Font = Font { weight: iced::font::Weight::Medium, ..Font::MONOSPACE };
+const TITLE_FONT: Font = crate::typeface::font(iced::font::Weight::Bold);
+const TIME_FONT: Font = crate::typeface::with(iced::Font::MONOSPACE, iced::font::Weight::Medium);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {

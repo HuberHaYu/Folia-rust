@@ -298,5 +298,5 @@ fn round_button<'a>(
 }
 
 fn semibold() -> iced::Font {
-    iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT }
+    crate::typeface::font(iced::font::Weight::Semibold)
 }

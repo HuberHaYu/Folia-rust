@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 use super::account::object;
 use super::eapi::{self, Client};
 use super::{collection, tracks};
-use crate::{Collection, CollectionKind, OmniError, RadioFeed};
+use crate::{Collection, CollectionDetail, CollectionKind, OmniError, RadioFeed};
 
 const PLAYLIST_PAGE: u64 = 50;
 /// `FAVORITE_ALBUMS_PAGE_SIZE`.
@@ -33,21 +33,44 @@ pub async fn user_playlists(client: &Client, user: &str) -> Result<Vec<Collectio
     }
 }
 
-pub async fn collection_tracks(client: &Client, collection: &Collection) -> Result<Vec<Track>, OmniError> {
+pub async fn collection_detail(client: &Client, collection: &Collection) -> Result<CollectionDetail, OmniError> {
     match collection.kind {
-        CollectionKind::Playlist => playlist_tracks(client, &collection.id).await,
+        CollectionKind::Playlist => playlist_detail(client, &collection.id).await,
         CollectionKind::Album => {
-            let answer = client.post(&format!("/api/v1/album/{}", digits(&collection.id)?), Map::new()).await?;
+            let id = digits(&collection.id)?;
+            let answer = client.post(&format!("/api/v1/album/{id}"), Map::new()).await?;
             eapi::check(&answer.body)?;
-            Ok(tracks(answer.body.get("songs")))
+            // `album_detail_dynamic`: whether the account saved it.
+            let state = client.post("/api/album/detail/dynamic", object(json!({ "id": id }))).await?;
+            let subscribed = state.body.get("isSub").and_then(Value::as_bool);
+            Ok(CollectionDetail { tracks: tracks(answer.body.get("songs")), subscribed, owner: None })
         }
-        CollectionKind::DailySongs => daily_songs(client).await,
-        CollectionKind::PersonalFm => personal_fm(client).await,
+        CollectionKind::DailySongs => {
+            Ok(CollectionDetail { tracks: daily_songs(client).await?, ..CollectionDetail::default() })
+        }
+        CollectionKind::PersonalFm => {
+            Ok(CollectionDetail { tracks: personal_fm(client).await?, ..CollectionDetail::default() })
+        }
     }
 }
 
+/// `playlist_subscribe` (`/api/playlist/subscribe` or `unsubscribe`) and `album_sub` (`/api/album/sub` or `unsub`).
+pub async fn set_subscribed(client: &Client, collection: &Collection, subscribed: bool) -> Result<(), OmniError> {
+    let path = match (collection.kind, subscribed) {
+        (CollectionKind::Playlist, true) => "/api/playlist/subscribe",
+        (CollectionKind::Playlist, false) => "/api/playlist/unsubscribe",
+        (CollectionKind::Album, true) => "/api/album/sub",
+        (CollectionKind::Album, false) => "/api/album/unsub",
+        (CollectionKind::DailySongs | CollectionKind::PersonalFm, _) => {
+            return Err(OmniError::Response("this collection cannot be saved".to_owned()));
+        }
+    };
+    let answer = client.post(path, object(json!({ "id": digits(&collection.id)? }))).await?;
+    eapi::check(&answer.body)
+}
+
 /// `playlist_track_all`: the playlist's ids, then their songs in batches, in the playlist's order.
-async fn playlist_tracks(client: &Client, id: &str) -> Result<Vec<Track>, OmniError> {
+async fn playlist_detail(client: &Client, id: &str) -> Result<CollectionDetail, OmniError> {
     let answer = client.post("/api/v6/playlist/detail", object(json!({ "id": id, "n": 100000, "s": 8 }))).await?;
     eapi::check(&answer.body)?;
     let ids: Vec<u64> = answer
@@ -56,6 +79,8 @@ async fn playlist_tracks(client: &Client, id: &str) -> Result<Vec<Track>, OmniEr
         .and_then(Value::as_array)
         .map(|rows| rows.iter().filter_map(|row| row.get("id").and_then(Value::as_u64)).collect())
         .unwrap_or_default();
+    let subscribed = answer.body.pointer("/playlist/subscribed").and_then(Value::as_bool);
+    let owner = answer.body.pointer("/playlist/creator/userId").and_then(Value::as_u64).map(|id| id.to_string());
     let mut songs = Vec::with_capacity(ids.len());
     for batch in ids.chunks(DETAIL_BATCH) {
         let wanted: Vec<Value> = batch.iter().map(|id| json!({ "id": id })).collect();
@@ -64,7 +89,7 @@ async fn playlist_tracks(client: &Client, id: &str) -> Result<Vec<Track>, OmniEr
         eapi::check(&answer.body)?;
         songs.extend(tracks(answer.body.get("songs")));
     }
-    Ok(songs)
+    Ok(CollectionDetail { tracks: songs, subscribed: Some(subscribed.unwrap_or(false)), owner })
 }
 
 /// `album_sublist`, every page.

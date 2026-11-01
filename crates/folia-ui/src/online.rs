@@ -53,6 +53,8 @@ pub enum Message {
     Albums(String, Result<Vec<Collection>, String>),
     Radio(String, Result<RadioFeed, String>),
     Explore(String, Result<Vec<ExploreSection>, String>),
+    /// The answer to 「换一批」.
+    ExploreRefreshed(String, Result<Vec<ExploreSection>, String>),
     Avatar(String, Option<folia_library::Cover>),
     Forgotten,
 }
@@ -68,6 +70,8 @@ pub struct Online {
     pub albums: Feed<Vec<Collection>>,
     pub radio: Feed<RadioFeed>,
     pub explore: Feed<Vec<ExploreSection>>,
+    /// 「换一批」 is on its way; the page on screen stays until it arrives.
+    pub explore_refreshing: bool,
     pub avatar: Option<iced::widget::image::Handle>,
 }
 
@@ -92,6 +96,7 @@ impl Online {
             albums: Feed::Idle,
             radio: Feed::Idle,
             explore: Feed::Idle,
+            explore_refreshing: false,
             avatar: None,
         };
         (online, task)
@@ -153,6 +158,34 @@ impl Online {
             Message::Explore(owner, result) => {
                 (Task::none(), self.settle(&owner, result, |online| &mut online.explore))
             }
+            Message::ExploreRefreshed(owner, result) => {
+                if !self.explore_refreshing || self.signed_in().is_none_or(|account| account.id != owner) {
+                    return (Task::none(), false);
+                }
+                self.explore_refreshing = false;
+                let fresh = match result {
+                    Ok(fresh) => fresh,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "explore refresh unavailable");
+                        return (Task::none(), false);
+                    }
+                };
+                let Feed::Ready(shown) = &mut self.explore else {
+                    self.explore = Feed::Ready(fresh);
+                    return (Task::none(), true);
+                };
+                // `exchanged`: a section that stands takes what it has now in its place, one NetEase no longer
+                // names keeps what it showed, and the new ones come after.
+                let mut joining = Vec::new();
+                for section in fresh {
+                    match shown.iter_mut().find(|standing| standing.key == section.key) {
+                        Some(standing) => *standing = section,
+                        None => joining.push(section),
+                    }
+                }
+                shown.extend(joining);
+                (Task::none(), true)
+            }
             Message::Avatar(owner, cover) => {
                 if self.signed_in().is_some_and(|account| account.id == owner) {
                     self.avatar = cover
@@ -168,16 +201,9 @@ impl Online {
         self.avatar = None;
         let (Some(omni), Some(url)) = (self.omni.clone(), account.avatar_url.clone()) else { return Task::none() };
         let owner = account.id.clone();
-        let work = async move {
-            let path = omni.fetch_cover(&url).await.ok()?;
-            blocking(move || {
-                let bytes = std::fs::read(&path).ok()?;
-                folia_library::cover_rgba(&bytes, AVATAR_PX, AVATAR_PX).ok()
-            })
-            .await
-            .flatten()
-        };
-        Task::perform(work, move |cover| Message::Avatar(owner.clone(), cover))
+        Task::perform(crate::background::online_cover(omni, url, AVATAR_PX), move |cover| {
+            Message::Avatar(owner.clone(), cover)
+        })
     }
 
     /// After a confirmed sign-in: keep the session, then read the account.
@@ -242,6 +268,23 @@ impl Online {
         }
     }
 
+    /// 「换一批」 (`refresh`): NetEase's page is read anew, every shelf handing out what it has not shown yet first.
+    pub fn refresh_explore(&mut self) -> Task<Message> {
+        let (Some(omni), Some(account)) = (self.omni.clone(), self.signed_in().cloned()) else { return Task::none() };
+        if self.explore_refreshing || self.explore == Feed::Loading || self.explore == Feed::Idle {
+            return Task::none();
+        }
+        self.explore_refreshing = true;
+        let owner = account.id;
+        Task::perform(async move { omni.explore(PROVIDER).await.map_err(|err| error_chain(&err)) }, move |r| {
+            Message::ExploreRefreshed(owner.clone(), r)
+        })
+    }
+
+    pub fn can_refresh_explore(&self) -> bool {
+        !self.explore_refreshing && matches!(self.explore, Feed::Ready(_) | Feed::Failed(_))
+    }
+
     fn load_playlists(&mut self, account: &Account) -> Task<Message> {
         let Some(omni) = self.omni.clone() else { return Task::none() };
         self.playlists = Feed::Loading;
@@ -271,6 +314,7 @@ impl Online {
         self.albums = Feed::Idle;
         self.radio = Feed::Idle;
         self.explore = Feed::Idle;
+        self.explore_refreshing = false;
     }
 
     /// Stores an answer unless it belongs to an account that is no longer signed in; returns whether it was kept.

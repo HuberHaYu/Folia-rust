@@ -38,7 +38,7 @@ enum Action {
     Local(usize),
     Open(Collection),
     /// Personal FM plays straight away (`isPersonalFmCard`).
-    Fm,
+    Fm(Collection),
     /// An explore song: its section's songs are the queue.
     Song {
         section: usize,
@@ -53,11 +53,91 @@ enum Action {
 pub struct Layer {
     pub collection: Collection,
     pub tracks: Feed<Vec<Track>>,
+    /// Whether the account saved it; `None` while unknown or where saving does not apply.
+    pub subscribed: Option<bool>,
+    owner: Option<String>,
+    pub subscribing: bool,
+    /// The page filter (`useBravaisCollectionFilter`) and the songs it keeps, by index into `tracks`.
+    pub query: String,
+    matches: Option<Vec<usize>>,
+    /// The song list panel is open (a navigation state of the seam).
+    pub list: bool,
+    /// How far the list is scrolled, for drawing only the rows in view.
+    pub list_offset: f32,
+    /// The ⋯ more menu is open.
+    pub menu: bool,
+    pub list_hover: Option<usize>,
+}
+
+impl Layer {
+    fn new(collection: Collection, tracks: Feed<Vec<Track>>) -> Self {
+        Self {
+            collection,
+            tracks,
+            subscribed: None,
+            owner: None,
+            subscribing: false,
+            query: String::new(),
+            matches: None,
+            list: false,
+            list_offset: 0.0,
+            menu: false,
+            list_hover: None,
+        }
+    }
+
+    /// `contextTracks`: the songs the filter keeps, or all of them, by index into `tracks`.
+    pub fn context(&self) -> Vec<usize> {
+        let count = self.tracks.ready().map_or(0, Vec::len);
+        self.matches.clone().unwrap_or_else(|| (0..count).collect())
+    }
+
+    fn context_tracks(&self) -> Vec<Track> {
+        let Some(tracks) = self.tracks.ready() else { return Vec::new() };
+        self.context().into_iter().filter_map(|index| tracks.get(index).cloned()).collect()
+    }
+
+    /// `matchTrackIndexes`: the title, the artists and the album hold the lower-cased query.
+    fn refilter(&mut self) {
+        let needle = self.query.trim().to_lowercase();
+        let Some(tracks) = self.tracks.ready().filter(|_| !needle.is_empty()) else {
+            self.matches = None;
+            return;
+        };
+        let text = |track: &Track| {
+            let artists = track.artist.clone().unwrap_or_default();
+            format!("{} {} {} {}", track.title, artists, track.album.clone().unwrap_or_default(), artists)
+                .to_lowercase()
+        };
+        self.matches = Some(
+            tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| text(track).contains(&needle))
+                .map(|(index, _)| index)
+                .collect(),
+        );
+    }
+
+    pub fn filtering(&self) -> bool {
+        self.matches.is_some()
+    }
 }
 
 /// What the shell does after a page message.
 pub enum Effect {
-    Play { queue: Vec<Track>, index: usize, origin: Option<String> },
+    Play {
+        queue: Vec<Track>,
+        index: usize,
+        origin: Option<String>,
+    },
+    /// Personal FM's first batch; `fm` is the feed later batches come from.
+    PlayFm {
+        queue: Vec<Track>,
+        fm: Collection,
+        origin: String,
+    },
+    Enqueue(Vec<Track>),
     SaveTab(HomeTab),
 }
 
@@ -73,6 +153,17 @@ pub struct LibraryPage {
     pub layer: Option<Layer>,
     tiles: Vec<Tile>,
     actions: Vec<Action>,
+    /// Where the playing queue was started, for 「定位」 (`playingSongLocator`).
+    source: Option<Source>,
+    /// The song to centre on once the collection being opened for 「定位」 has its tracks.
+    locating: Option<i64>,
+}
+
+/// The wall a queue was started from: a tab's own wall or a collection's.
+#[derive(Debug, Clone)]
+enum Source {
+    Tab(HomeTab),
+    Collection(Collection),
 }
 
 #[derive(Debug, Clone)]
@@ -80,14 +171,30 @@ pub enum Message {
     Import,
     Picked(Option<PathBuf>),
     Reload,
+    RefreshExplore,
+    /// 「定位」: back to the wall the queue came from, centred on the song with this id.
+    Locate(i64),
     Loaded(Result<Vec<Track>, String>),
     Wall(wall::Message),
     Frame,
     Tab(HomeTab),
     Online(online::Message),
-    Opened(String, Result<Vec<Track>, String>),
+    Opened(String, Result<folia_omni::CollectionDetail, String>),
     Back,
     PlayAll,
+    EnqueueAll,
+    Query(String),
+    OpenList,
+    CloseList,
+    ListScrolled(f32),
+    /// A list row: click flies the camera to the song, double-click plays it.
+    LocateRow(usize),
+    PlayRow(usize),
+    ToggleSubscribe,
+    Subscribed(String, bool, Result<(), String>),
+    CollectionMenu,
+    ReloadCollection,
+    RowHover(Option<usize>),
 }
 
 impl LibraryPage {
@@ -105,6 +212,8 @@ impl LibraryPage {
             tab,
             online,
             layer: None,
+            source: None,
+            locating: None,
             tiles: Vec::new(),
             actions: Vec::new(),
         };
@@ -153,15 +262,55 @@ impl LibraryPage {
     }
 
     /// Moves the wall so the local song at `index` is in the middle.
-    pub fn reveal(&mut self, index: usize) {
-        if self.tab == HomeTab::Local && self.layer.is_none() {
-            self.wall.center_on(index);
+    /// 「定位」: shows the wall the queue was started from, opening its collection again if need be, and
+    /// centres the camera on the song's copy nearest it (`useBravaisLocate`).
+    fn locate(&mut self, track: i64, i18n: &I18n) -> (Task<Message>, Option<Effect>) {
+        match self.source.clone() {
+            Some(Source::Collection(collection)) => {
+                let open = self.layer.as_ref().is_some_and(|layer| {
+                    layer.collection.id == collection.id && layer.collection.kind == collection.kind
+                });
+                if open {
+                    return (self.center_on_track(track), None);
+                }
+                self.locating = Some(track);
+                (self.open(collection, i18n), None)
+            }
+            Some(Source::Tab(tab)) => {
+                let (shown, effect) = if tab == self.tab && self.layer.is_none() {
+                    (Task::none(), None)
+                } else {
+                    self.update(Message::Tab(tab), i18n)
+                };
+                (Task::batch([shown, self.center_on_track(track)]), effect)
+            }
+            None => (Task::none(), None),
         }
     }
 
+    fn center_on_track(&mut self, track: i64) -> Task<Message> {
+        let Some(index) = self.tiles.iter().position(|tile| tile.id == track && !tile.heading) else {
+            return Task::none();
+        };
+        self.wall.center_on(index);
+        self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall)
+    }
+
     /// Widens the seam into the full info strip while a collection layer is open.
+    /// Closes the collection's ⋯ menu, as a press outside it or Escape does.
+    pub fn dismiss_menu(&mut self) {
+        if let Some(layer) = self.layer.as_mut() {
+            layer.menu = false;
+        }
+    }
+
+    pub fn menu_open(&self) -> bool {
+        self.layer.as_ref().is_some_and(|layer| layer.menu)
+    }
+
     pub fn set_tab_chrome(&self, home: &mut crate::home::HomeChrome, now: Instant) {
-        home.set_collection(self.layer.is_some(), now);
+        let list = self.layer.as_ref().is_some_and(|layer| layer.list);
+        home.set_collection(self.layer.is_some(), list, now);
     }
 
     /// After a confirmed sign-in, keeps the session and reads the account.
@@ -186,6 +335,8 @@ impl LibraryPage {
             Message::Picked(Some(folder)) => (self.start(Some(folder), true), None),
             Message::Picked(None) => (Task::none(), None),
             Message::Reload => (self.start(None, true), None),
+            Message::RefreshExplore => (self.online.refresh_explore().map(Message::Online), None),
+            Message::Locate(track) => self.locate(track, i18n),
             Message::Loaded(result) => {
                 self.busy = false;
                 match result {
@@ -212,7 +363,9 @@ impl LibraryPage {
                 }
             }
             Message::Frame => {
-                self.wall.tick_coast(Instant::now());
+                if self.wall.tick_coast(Instant::now()) {
+                    return (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None);
+                }
                 (Task::none(), None)
             }
             Message::Tab(tab) => {
@@ -240,26 +393,119 @@ impl LibraryPage {
                     return (Task::none(), None);
                 };
                 layer.tracks = match result {
-                    Ok(tracks) => Feed::Ready(tracks),
+                    Ok(detail) => {
+                        layer.subscribed = detail.subscribed;
+                        layer.owner = detail.owner;
+                        Feed::Ready(detail.tracks)
+                    }
                     Err(err) => {
                         tracing::warn!(error = %err, "collection unavailable");
                         Feed::Failed(err)
                     }
                 };
-                (self.rebuild(i18n), None)
+                layer.refilter();
+                let rebuilt = self.rebuild(i18n);
+                let located = match self.locating.take() {
+                    Some(track) => self.center_on_track(track),
+                    None => Task::none(),
+                };
+                (Task::batch([rebuilt, located]), None)
             }
             Message::Back => {
+                if let Some(layer) = self.layer.as_mut().filter(|layer| layer.list) {
+                    // The panel is a navigation state: back closes it first.
+                    layer.list = false;
+                    return (Task::none(), None);
+                }
                 self.layer = None;
                 (self.rebuild(i18n), None)
             }
             Message::PlayAll => {
                 let Some(layer) = &self.layer else { return (Task::none(), None) };
-                let Some(tracks) = layer.tracks.ready().filter(|tracks| !tracks.is_empty()) else {
+                let queue = layer.context_tracks();
+                if queue.is_empty() {
+                    return (Task::none(), None);
+                }
+                self.source = Some(Source::Collection(layer.collection.clone()));
+                (Task::none(), Some(Effect::Play { queue, index: 0, origin: Some(layer.collection.name.clone()) }))
+            }
+            Message::EnqueueAll => {
+                let Some(layer) = &self.layer else { return (Task::none(), None) };
+                let queue = layer.context_tracks();
+                ((Task::none()), (!queue.is_empty()).then_some(Effect::Enqueue(queue)))
+            }
+            Message::Query(query) => {
+                let Some(layer) = self.layer.as_mut() else { return (Task::none(), None) };
+                let was = layer.filtering();
+                layer.query = query;
+                layer.refilter();
+                layer.list_offset = 0.0;
+                if !was && !layer.filtering() {
+                    return (Task::none(), None);
+                }
+                (self.rebuild(i18n), None)
+            }
+            Message::OpenList | Message::CloseList => {
+                if let Some(layer) = self.layer.as_mut() {
+                    layer.list = matches!(message, Message::OpenList);
+                    layer.menu = false;
+                }
+                (Task::none(), None)
+            }
+            Message::ListScrolled(offset) => {
+                if let Some(layer) = self.layer.as_mut() {
+                    layer.list_offset = offset;
+                }
+                (Task::none(), None)
+            }
+            Message::LocateRow(row) => {
+                // The list's rows are the wall's tiles in order: the camera flies to the copy nearest it.
+                self.wall.center_on(row);
+                (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None)
+            }
+            Message::PlayRow(row) => self.press(row, i18n),
+            Message::ToggleSubscribe => {
+                let (Some(layer), Some(omni)) = (self.layer.as_mut(), self.online.omni().cloned()) else {
                     return (Task::none(), None);
                 };
-                let effect =
-                    Effect::Play { queue: tracks.clone(), index: 0, origin: Some(layer.collection.name.clone()) };
-                (Task::none(), Some(effect))
+                let Some(subscribed) = layer.subscribed.filter(|_| !layer.subscribing) else {
+                    return (Task::none(), None);
+                };
+                layer.subscribing = true;
+                let (id, wanted, collection) = (layer.collection.id.clone(), !subscribed, layer.collection.clone());
+                let work =
+                    async move { omni.set_subscribed(&collection, wanted).await.map_err(|err| error_chain(&err)) };
+                (Task::perform(work, move |result| Message::Subscribed(id.clone(), wanted, result)), None)
+            }
+            Message::Subscribed(id, wanted, result) => {
+                let Some(layer) = self.layer.as_mut().filter(|layer| layer.collection.id == id) else {
+                    return (Task::none(), None);
+                };
+                layer.subscribing = false;
+                match result {
+                    Ok(()) => layer.subscribed = Some(wanted),
+                    Err(err) => tracing::warn!(error = %err, "collection not saved"),
+                }
+                (Task::none(), None)
+            }
+            Message::RowHover(row) => {
+                if let Some(layer) = self.layer.as_mut() {
+                    layer.list_hover = row;
+                }
+                (Task::none(), None)
+            }
+            Message::CollectionMenu => {
+                if let Some(layer) = self.layer.as_mut() {
+                    layer.menu = !layer.menu;
+                }
+                (Task::none(), None)
+            }
+            Message::ReloadCollection => {
+                let Some(collection) = self.layer.as_ref().map(|layer| layer.collection.clone()) else {
+                    return (Task::none(), None);
+                };
+                self.layer = None;
+                (self.open(collection, i18n), None)
             }
         }
     }
@@ -268,20 +514,30 @@ impl LibraryPage {
     fn press(&mut self, index: usize, i18n: &I18n) -> (Task<Message>, Option<Effect>) {
         match self.actions.get(index).cloned().unwrap_or(Action::None) {
             Action::Local(index) => {
+                self.source = Some(Source::Tab(HomeTab::Local));
                 (Task::none(), Some(Effect::Play { queue: self.tracks.clone(), index, origin: None }))
             }
             Action::LayerTrack(index) => {
+                // `playTrack`: the song plays with the songs the filter keeps as its queue.
                 let Some(layer) = &self.layer else { return (Task::none(), None) };
-                let Some(tracks) = layer.tracks.ready() else { return (Task::none(), None) };
+                let context = layer.context();
+                let Some(position) = context.iter().position(|kept| *kept == index) else {
+                    return (Task::none(), None);
+                };
                 let origin = Some(layer.collection.name.clone());
-                (Task::none(), Some(Effect::Play { queue: tracks.clone(), index, origin }))
+                let queue = layer.context_tracks();
+                self.source = Some(Source::Collection(layer.collection.clone()));
+                (Task::none(), Some(Effect::Play { queue, index: position, origin }))
             }
-            Action::Fm => {
+            Action::Fm(fm) => {
                 let Some(feed) = self.online.radio.ready().filter(|feed| !feed.personal_fm.is_empty()) else {
                     return (Task::none(), None);
                 };
-                let origin = Some(i18n.t("home.personalFm").to_owned());
-                (Task::none(), Some(Effect::Play { queue: feed.personal_fm.clone(), index: 0, origin }))
+                let origin = i18n.t("home.personalFm").to_owned();
+                let queue = feed.personal_fm.clone();
+                // Personal FM is no wall of its own: there is nowhere to locate its songs.
+                self.source = None;
+                (Task::none(), Some(Effect::PlayFm { queue, fm, origin }))
             }
             Action::Song { section, song } => {
                 let Some(shelf) = self.online.explore.ready().and_then(|sections| sections.get(section)) else {
@@ -296,6 +552,7 @@ impl LibraryPage {
                     })
                     .collect();
                 let origin = Some(shelf_heading(&shelf.shelf, i18n).to_owned());
+                self.source = Some(Source::Tab(HomeTab::Explore));
                 (Task::none(), Some(Effect::Play { queue: songs, index: song, origin }))
             }
             Action::Open(collection) => (self.open(collection, i18n), None),
@@ -311,13 +568,13 @@ impl LibraryPage {
             (Some(_), _) => Task::none(),
             (None, Some(omni)) => {
                 let (id, wanted) = (collection.id.clone(), collection.clone());
-                let work = async move { omni.collection_tracks(&wanted).await.map_err(|err| error_chain(&err)) };
+                let work = async move { omni.collection_detail(&wanted).await.map_err(|err| error_chain(&err)) };
                 Task::perform(work, move |result| Message::Opened(id.clone(), result))
             }
             (None, None) => Task::none(),
         };
         let tracks = daily.map_or(Feed::Loading, Feed::Ready);
-        self.layer = Some(Layer { collection, tracks });
+        self.layer = Some(Layer::new(collection, tracks));
         Task::batch([fetch, self.rebuild(i18n)])
     }
 
@@ -332,22 +589,29 @@ impl LibraryPage {
     fn compose(&self, i18n: &I18n) -> (Vec<Tile>, Vec<Action>, Shape) {
         if let Some(layer) = &self.layer {
             let tracks = layer.tracks.ready().map(Vec::as_slice).unwrap_or_default();
-            let tiles = tracks.iter().map(|track| track_tile(track, None, i18n)).collect();
-            return (tiles, (0..tracks.len()).map(Action::LayerTrack).collect(), Shape::Ranked);
+            let context = layer.context();
+            let tiles = context
+                .iter()
+                .filter_map(|index| tracks.get(*index))
+                .map(|track| track_tile(track, None, i18n))
+                .collect();
+            // Filtering turns the edgeless wall into a ranked one of the matches (`mode: 'finite'`).
+            let shape = if layer.filtering() { Shape::Finite } else { Shape::Blocks };
+            return (tiles, context.into_iter().map(Action::LayerTrack).collect(), shape);
         }
         if self.tab == HomeTab::Local {
             let tiles = self.tracks.iter().map(|track| track_tile(track, None, i18n)).collect();
-            return (tiles, (0..self.tracks.len()).map(Action::Local).collect(), Shape::Ranked);
+            return (tiles, (0..self.tracks.len()).map(Action::Local).collect(), Shape::Blocks);
         }
         if self.online.signed_in().is_none() {
-            return (Vec::new(), Vec::new(), Shape::Ranked);
+            return (Vec::new(), Vec::new(), Shape::Blocks);
         }
         let mut tiles = Vec::new();
         let mut actions = Vec::new();
         let card = |collection: &Collection, description: String, tiles: &mut Vec<Tile>, actions: &mut Vec<Action>| {
             tiles.push(card_tile(collection, description, i18n));
             actions.push(if collection.kind == CollectionKind::PersonalFm {
-                Action::Fm
+                Action::Fm(collection.clone())
             } else {
                 Action::Open(collection.clone())
             });
@@ -377,12 +641,12 @@ impl LibraryPage {
             HomeTab::Explore => return self.compose_explore(i18n),
             HomeTab::Local => {}
         }
-        (tiles, actions, Shape::Ranked)
+        (tiles, actions, Shape::Blocks)
     }
 
     /// `projectExploreItems` and `projectExploreHeadings`: entries first, then one heading tile per section.
     fn compose_explore(&self, i18n: &I18n) -> (Vec<Tile>, Vec<Action>, Shape) {
-        let Some(sections) = self.online.explore.ready() else { return (Vec::new(), Vec::new(), Shape::Ranked) };
+        let Some(sections) = self.online.explore.ready() else { return (Vec::new(), Vec::new(), Shape::Blocks) };
         let mut tiles = Vec::new();
         let mut actions = Vec::new();
         let mut laid = Vec::new();
@@ -428,6 +692,8 @@ impl LibraryPage {
                 badge: Some(format!("{:02} / {:02}", section_index + 1, count)),
                 cover: CoverSource::None,
                 heading: true,
+                hue: 0.0,
+                stack: false,
             });
             actions.push(Action::None);
             shape.push(lots::Section { key, heading, entries });
@@ -438,9 +704,14 @@ impl LibraryPage {
     /// The seam's status line (`BravaisHomeDirectory` status).
     pub fn status(&self, i18n: &I18n) -> Option<String> {
         if let Some(layer) = &self.layer {
+            // `projectCollectionStatus`: loading, a failed read, an empty collection, or a filter without matches.
             return match &layer.tracks {
                 Feed::Loading | Feed::Idle => Some(i18n.t("playlist.loading").to_owned()),
-                Feed::Failed(_) => Some(i18n.t("home.loadingLibrary").to_owned()),
+                Feed::Failed(err) => Some(i18n.format("playlist.loadFailed", &[("error", err)])),
+                Feed::Ready(tracks) if tracks.is_empty() => Some(i18n.t("home.loadingLibrary").to_owned()),
+                Feed::Ready(_) if layer.matches.as_ref().is_some_and(Vec::is_empty) => {
+                    Some(i18n.t("home.gridSearchNoResults").to_owned())
+                }
                 Feed::Ready(_) => None,
             };
         }
@@ -477,16 +748,73 @@ impl LibraryPage {
         }
     }
 
-    /// The open collection's title, count line and kind, for the seam.
-    pub fn layer_meta(&self, i18n: &I18n) -> Option<(String, String)> {
+    /// What the seam shows of the open collection: title, count, filter, star, the list rows in view and the menu.
+    /// `refreshTool`: on the explore tab of a signed-in account, enabled unless a read is on its way.
+    pub fn explore_refresh(&self) -> Option<bool> {
+        let shown = self.tab == HomeTab::Explore && self.online.signed_in().is_some() && self.layer.is_none();
+        shown.then(|| self.online.can_refresh_explore())
+    }
+
+    pub fn layer_seam(&self, i18n: &I18n, playing: Option<i64>, rows_in_view: usize) -> Option<crate::home::LayerSeam> {
         let layer = self.layer.as_ref()?;
-        let count = layer.tracks.ready().map(|tracks| tracks.len() as u32).or(layer.collection.track_count);
-        let kind = i18n.t(kind_label(layer.collection.kind)).to_owned();
-        let meta = match count {
-            Some(count) => format!("{kind} · {}", track_count(i18n, count)),
-            None => kind,
+        let tracks = layer.tracks.ready().map(Vec::as_slice).unwrap_or_default();
+        let context = layer.context();
+        let total = tracks.len().max(layer.collection.track_count.unwrap_or(0) as usize);
+        let match_label = i18n.format(
+            "libraryBravaisCollection.matchCount",
+            &[("matches", &context.len().to_string()), ("total", &tracks.len().to_string())],
+        );
+        let meta = if layer.filtering() { match_label.clone() } else { track_count(i18n, total as u32) };
+        let savable = matches!(layer.collection.kind, CollectionKind::Playlist | CollectionKind::Album);
+        let own = layer.owner.is_some()
+            && layer.owner.as_deref() == self.online.signed_in().map(|account| account.id.as_str());
+        let star = layer.subscribed.filter(|_| savable && !own).map(|saved| {
+            let key = match (layer.collection.kind == CollectionKind::Album, saved) {
+                (true, true) => "options.unsubscribeAlbum",
+                (true, false) => "options.subscribeAlbum",
+                (false, true) => "options.unsubscribePlaylist",
+                (false, false) => "options.subscribePlaylist",
+            };
+            (saved, layer.subscribing, i18n.t(key).to_owned())
+        });
+        let first = if layer.list { (layer.list_offset / crate::home::LIST_ROW) as usize } else { 0 };
+        let first = first.saturating_sub(6).min(context.len());
+        let rows = if layer.list {
+            context
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take(rows_in_view + 12)
+                .filter_map(|(row, index)| tracks.get(*index).map(|track| (row, track)))
+                .map(|(row, track)| crate::home::ListRow {
+                    badge: format!("{:02}", row + 1),
+                    title: track.title.clone(),
+                    subtitle: track.artist.clone().unwrap_or_default(),
+                    time: if track.duration > 0.0 {
+                        crate::background::format_time(track.duration)
+                    } else {
+                        String::new()
+                    },
+                    current: playing == Some(track.id),
+                })
+                .collect()
+        } else {
+            Vec::new()
         };
-        Some((layer.collection.name.clone(), meta))
+        Some(crate::home::LayerSeam {
+            title: layer.collection.name.clone(),
+            meta,
+            query: layer.query.clone(),
+            filtering: layer.filtering(),
+            match_label,
+            star,
+            list: layer.list,
+            first,
+            count: context.len(),
+            rows,
+            menu: layer.menu,
+            playable: !context.is_empty(),
+        })
     }
 
     /// The empty-wall copy: online tabs without an account (`onlineWallHint`), or an empty local library.
@@ -615,7 +943,8 @@ fn radio_cards(feed: &folia_omni::RadioFeed, i18n: &I18n) -> Vec<Collection> {
             cover_url: feed.personal_fm.first().and_then(|track| track.cover_url.clone()),
             track_count: None,
             creator: None,
-            description: Some(i18n.t("home.personalFm").to_owned()),
+            // `personalFmModeLabel`: NetEase has FM modes, and the mode in use is the default one.
+            description: Some(i18n.t("personalFmMode.mode.DEFAULT").to_owned()),
         });
     }
     cards.push(Collection {
@@ -652,6 +981,18 @@ fn card_tile(collection: &Collection, description: String, i18n: &I18n) -> Tile 
         badge: Some(count.map_or_else(|| kind.to_owned(), |count| format!("{kind} · {count}"))),
         cover: collection.cover_url.clone().map_or(CoverSource::None, CoverSource::Remote),
         heading: false,
+        hue: wall::key_hue(&format!("card:{}:{}", card_type(collection.kind), collection.id)),
+        stack: collection.kind != CollectionKind::PersonalFm,
+    }
+}
+
+/// The card's `type`, as `homeCardItemKey` writes it into the item key.
+fn card_type(kind: CollectionKind) -> &'static str {
+    match kind {
+        CollectionKind::Playlist => "playlist",
+        CollectionKind::Album => "album",
+        CollectionKind::PersonalFm => "radio",
+        CollectionKind::DailySongs => "daily_recommendations",
     }
 }
 
@@ -664,7 +1005,20 @@ fn track_tile(track: &Track, badge: Option<String>, i18n: &I18n) -> Tile {
     let artist = track.artist.clone().unwrap_or_else(|| {
         if track.online.is_some() { i18n.t("player.unknownArtist").to_owned() } else { String::new() }
     });
-    Tile { id: track.id, title: track.title.clone(), subtitle: artist, badge, cover, heading: false }
+    let key = match &track.online {
+        Some(online) => format!("online:{}:{}", online.provider, online.id),
+        None => format!("local:{}", track.id),
+    };
+    Tile {
+        id: track.id,
+        title: track.title.clone(),
+        subtitle: artist,
+        badge,
+        cover,
+        heading: false,
+        hue: wall::key_hue(&key),
+        stack: false,
+    }
 }
 
 /// `wall.css`: the theme background lit by an accent glow top-left and a secondary glow bottom-right.
@@ -704,7 +1058,7 @@ fn hint<'a>(
     let title = text(title)
         .size(title_size)
         .line_height(iced::widget::text::LineHeight::Relative(1.18))
-        .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
+        .font(crate::typeface::font(iced::font::Weight::Bold))
         .color(Color { a: 0.22 * fade, ..ink })
         .align_x(Alignment::Center)
         .width(Length::Fill);

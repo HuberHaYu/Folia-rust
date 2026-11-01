@@ -21,6 +21,7 @@ mod settings;
 mod settings_kit;
 mod splash;
 mod track_list;
+mod typeface;
 mod wall;
 
 pub use background::{error_chain, format_time};
@@ -462,6 +463,18 @@ impl Shell {
                 let start = self.playback.play(queue, index, Some(folia_core::Origin { name })).map(Message::Playback);
                 Task::batch([start, self.ensure_art()])
             }
+            Some(library::Effect::PlayFm { queue, fm, origin }) => {
+                self.page = Page::NowPlaying;
+                self.reveal_chrome();
+                let start =
+                    self.playback.play_fm(queue, fm, folia_core::Origin { name: origin }).map(Message::Playback);
+                Task::batch([start, self.ensure_art()])
+            }
+            Some(library::Effect::Enqueue(tracks)) => {
+                let added = self.playback.enqueue(tracks);
+                tracing::debug!(added, "songs added to the queue");
+                Task::none()
+            }
             Some(library::Effect::SaveTab(tab)) => {
                 self.general.home_tab = tab;
                 save(&self.store, &self.general)
@@ -864,6 +877,7 @@ impl Shell {
             daylight: self.appearance.theme == ThemeMode::Light,
             has_track: self.playback.current().is_some(),
             busy: self.library.busy,
+            explore_refresh: self.library.explore_refresh(),
             volume: self.playback.settings.volume,
             muted: self.playback.muted,
             window_width: self.window_size.width,
@@ -884,7 +898,12 @@ impl Shell {
             tabs: library::TABS.iter().map(|&tab| (tab, self.i18n.t(library::tab_label(tab)))).collect(),
             current: self.library.tab,
             account: self.account_slot(),
-            layer: self.library.layer_meta(&self.i18n),
+            layer: self.library.layer_seam(
+                &self.i18n,
+                self.playback.current().map(|track| track.id),
+                (self.window_size.height / home::LIST_ROW) as usize,
+            ),
+            list_hover: self.library.layer.as_ref().and_then(|layer| layer.list_hover),
         }
     }
 
@@ -937,13 +956,7 @@ impl Shell {
                 return Task::none();
             };
             self.art_pending = Some(id);
-            let load = async move {
-                let path = omni.fetch_cover(&url).await.map_err(|err| err.to_string())?;
-                let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
-                folia_library::cover_rgba(&bytes, ART_PX, ART_PX).map_err(|err| err.to_string())
-            };
-            return Task::perform(load, move |cover: Result<folia_library::Cover, String>| {
-                let cover = cover.inspect_err(|err| tracing::warn!(error = %err, "online cover unavailable")).ok();
+            return Task::perform(crate::background::online_cover(omni, url, ART_PX), move |cover| {
                 Message::Art(id, cover)
             });
         }
@@ -990,10 +1003,10 @@ impl Shell {
             }
             panel::Effect::Locate => {
                 self.page = Page::Library;
-                if let Some(index) = self.playback.queue.current_index() {
-                    self.library.reveal(index);
+                match self.playback.current().map(|track| track.id) {
+                    Some(track) => self.library_message(library::Message::Locate(track)),
+                    None => Task::none(),
                 }
-                Task::none()
             }
             panel::Effect::Settings => {
                 self.settings = Some(settings::Settings::open());
@@ -1025,6 +1038,9 @@ impl Shell {
     }
 
     fn home(&mut self, message: home::Message) -> Task<Message> {
+        if !matches!(message, home::Message::CollectionMenu) {
+            self.library.dismiss_menu();
+        }
         let reopen = matches!(message, home::Message::Tab) && !self.home.is_hidden();
         self.home.update(&message);
         if reopen {
@@ -1049,9 +1065,20 @@ impl Shell {
             }
             home::Message::Import => self.library_message(library::Message::Import),
             home::Message::Reload => self.library_message(library::Message::Reload),
+            home::Message::RefreshExplore => self.library_message(library::Message::RefreshExplore),
             home::Message::SelectTab(tab) => self.library_message(library::Message::Tab(tab)),
             home::Message::Back => self.library_message(library::Message::Back),
             home::Message::PlayAll => self.library_message(library::Message::PlayAll),
+            home::Message::EnqueueAll => self.library_message(library::Message::EnqueueAll),
+            home::Message::Query(query) => self.library_message(library::Message::Query(query)),
+            home::Message::OpenList => self.library_message(library::Message::OpenList),
+            home::Message::ListScrolled(offset) => self.library_message(library::Message::ListScrolled(offset)),
+            home::Message::LocateRow(row) => self.library_message(library::Message::LocateRow(row)),
+            home::Message::PlayRow(row) => self.library_message(library::Message::PlayRow(row)),
+            home::Message::ToggleSubscribe => self.library_message(library::Message::ToggleSubscribe),
+            home::Message::CollectionMenu => self.library_message(library::Message::CollectionMenu),
+            home::Message::ReloadCollection => self.library_message(library::Message::ReloadCollection),
+            home::Message::RowHover(row) => self.library_message(library::Message::RowHover(row)),
             home::Message::Connect => self.open_login(),
             home::Message::Volume(volume) => {
                 self.playback.update(playback::Message::Volume(volume), &self.store).map(Message::Playback)
@@ -1085,7 +1112,7 @@ impl Shell {
     }
 
     fn home_menu_open(&self) -> bool {
-        self.home.menu_open()
+        self.home.menu_open() || self.library.menu_open()
     }
 
     /// Saves the appearance and lets an open settings window glide the marks the change moved.

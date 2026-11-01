@@ -2,6 +2,7 @@
 
 mod providers;
 mod qr;
+mod reads;
 mod session;
 
 use std::future::Future;
@@ -142,6 +143,16 @@ impl Collection {
     }
 }
 
+/// A collection's songs and the account's relation to it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CollectionDetail {
+    pub tracks: Vec<Track>,
+    /// Whether the account saved it; `None` where saving does not apply (daily songs, personal FM).
+    pub subscribed: Option<bool>,
+    /// The playlist creator's user id: an account cannot save its own playlist.
+    pub owner: Option<String>,
+}
+
 /// The radio tab: personal FM, the daily songs and the recommended playlists (`getHomeFeed`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RadioFeed {
@@ -196,11 +207,25 @@ pub trait Provider: Send + Sync {
     fn session(&self) -> Option<String>;
     fn restore_session(&self, saved: &str) -> Result<(), OmniError>;
     fn user_playlists<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Collection>, OmniError>>;
-    fn collection_tracks<'a>(&'a self, collection: &'a Collection) -> BoxFuture<'a, Result<Vec<Track>, OmniError>>;
+    fn collection_detail<'a>(
+        &'a self,
+        collection: &'a Collection,
+    ) -> BoxFuture<'a, Result<CollectionDetail, OmniError>>;
+    /// Saves (`true`) or unsaves a playlist or an album for the signed-in account.
+    fn set_subscribed<'a>(
+        &'a self,
+        collection: &'a Collection,
+        subscribed: bool,
+    ) -> BoxFuture<'a, Result<(), OmniError>>;
     fn favorite_albums(&self) -> BoxFuture<'_, Result<Vec<Collection>, OmniError>>;
     fn radio_feed(&self, limit: u32) -> BoxFuture<'_, Result<RadioFeed, OmniError>>;
     fn explore(&self) -> BoxFuture<'_, Result<Vec<ExploreSection>, OmniError>>;
+    /// The address of `url` resized to `px` square on the platform's image CDN, when `url` is on it.
+    fn sized_cover(&self, url: &str, px: u32) -> Option<String>;
 }
+
+/// Cover downloads at once: what a browser opens to one host, so the first screen of tiles does not queue dozens.
+const COVER_DOWNLOADS: usize = 6;
 
 #[derive(Clone)]
 pub struct Omni {
@@ -208,6 +233,7 @@ pub struct Omni {
     http: reqwest::Client,
     cache_dir: PathBuf,
     keyring_service: String,
+    covers: Arc<tokio::sync::Semaphore>,
 }
 
 impl Omni {
@@ -216,7 +242,8 @@ impl Omni {
         let http = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
             .build()?;
-        Ok(Self { providers: Arc::new(providers::all(&http)), http, cache_dir, keyring_service })
+        let covers = Arc::new(tokio::sync::Semaphore::new(COVER_DOWNLOADS));
+        Ok(Self { providers: Arc::new(providers::all(&http)), http, cache_dir, keyring_service, covers })
     }
 
     /// `(id, display name)` of each provider, in registration order.
@@ -294,8 +321,12 @@ impl Omni {
         self.provider(provider)?.user_playlists(user).await
     }
 
-    pub async fn collection_tracks(&self, collection: &Collection) -> Result<Vec<Track>, OmniError> {
-        self.provider(&collection.provider)?.collection_tracks(collection).await
+    pub async fn collection_detail(&self, collection: &Collection) -> Result<CollectionDetail, OmniError> {
+        self.provider(&collection.provider)?.collection_detail(collection).await
+    }
+
+    pub async fn set_subscribed(&self, collection: &Collection, subscribed: bool) -> Result<(), OmniError> {
+        self.provider(&collection.provider)?.set_subscribed(collection, subscribed).await
     }
 
     pub async fn favorite_albums(&self, provider: &str) -> Result<Vec<Collection>, OmniError> {
@@ -334,11 +365,18 @@ impl Omni {
         Ok(path)
     }
 
-    /// Downloads a cover once into `covers/` and returns the cached file. `http://` is read as `https://`.
-    pub async fn fetch_cover(&self, url: &str) -> Result<PathBuf, OmniError> {
+    /// Downloads a cover once into `covers/` and returns the cached file. The platform's CDN is asked for a `px`
+    /// square (`getSizedCoverUrl`); `http://` is read as `https://`; at most `COVER_DOWNLOADS` run at once.
+    pub async fn fetch_cover(&self, url: &str, px: u32) -> Result<PathBuf, OmniError> {
         let url = https(url);
+        let url = self.providers.iter().find_map(|provider| provider.sized_cover(&url, px)).unwrap_or(url);
         let dir = self.cache_dir.join("covers");
         let path = dir.join(cover_cache_key(&url));
+        if path.is_file() {
+            return Ok(path);
+        }
+        let _permit =
+            self.covers.acquire().await.map_err(|err| OmniError::Response(format!("cover queue closed: {err}")))?;
         if path.is_file() {
             return Ok(path);
         }
@@ -348,7 +386,7 @@ impl Omni {
         let partial = path.with_extension("part");
         std::fs::write(&partial, &bytes).map_err(io_err)?;
         std::fs::rename(&partial, &path).map_err(io_err)?;
-        tracing::info!(bytes = bytes.len(), "cover cached");
+        tracing::debug!(bytes = bytes.len(), px, "cover cached");
         Ok(path)
     }
 

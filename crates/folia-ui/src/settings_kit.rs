@@ -8,7 +8,7 @@ use crate::icons::icon;
 
 const ON_ACCENT_DARK: Rgb = Rgb::hex(0x17171a);
 const ON_ACCENT_LIGHT: Rgb = Rgb::hex(0xffffff);
-pub const SEMIBOLD: Font = Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT };
+pub const SEMIBOLD: Font = crate::typeface::font(iced::font::Weight::Semibold);
 /// Height of a row with a hint line: `min-h-14 py-2.5`, a 20px label and an 18px hint 2px under it.
 pub const ROW_HINT_HEIGHT: f32 = 60.0;
 /// Space above a group (`mt-7`, `mt-5` for the first) and its heading line with the gap under it.
