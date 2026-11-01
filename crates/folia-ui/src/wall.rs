@@ -614,6 +614,7 @@ impl Wall {
         let scale = wall_scale(self.viewport.width);
         let middle = Point::new(self.viewport.width / 2.0, self.viewport.height / 2.0);
         let mut wanted: Vec<(f32, i64, CoverSource, u32)> = Vec::new();
+        self.covers.begin_pass();
         for placement in &self.shown {
             let Some(tile) = tiles.get(placement.track) else { continue };
             self.covers.touch(&tile.id);

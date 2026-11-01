@@ -62,39 +62,52 @@ fn sidecar(track_path: &Path) -> Option<Vec<u8>> {
 pub struct CoverCache<K, V> {
     limit: usize,
     used: usize,
-    entries: VecDeque<(K, Option<V>, usize)>,
+    /// Key, cover, its bytes, and the pass it was last used in.
+    entries: VecDeque<(K, Option<V>, usize, u64)>,
+    /// Set once `begin_pass` is called: entries used in the current pass are kept even past the budget.
+    pass: Option<u64>,
 }
 
 impl<K: PartialEq, V> CoverCache<K, V> {
     pub fn new(limit_bytes: usize) -> Self {
-        Self { limit: limit_bytes, used: 0, entries: VecDeque::new() }
+        Self { limit: limit_bytes, used: 0, entries: VecDeque::new(), pass: None }
     }
 
     /// The entry for `key`, without counting it as a use.
     pub fn peek(&self, key: &K) -> Option<&Option<V>> {
-        self.entries.iter().find(|(k, ..)| k == key).map(|(_, value, _)| value)
+        self.entries.iter().find(|(k, ..)| k == key).map(|(_, value, ..)| value)
+    }
+
+    /// Starts a new pass over what is on screen: covers touched or inserted from now on are in use and are not dropped
+    /// for each other, so a view that needs more than the budget does not keep evicting its own covers.
+    pub fn begin_pass(&mut self) {
+        self.pass = Some(self.pass.map_or(1, |pass| pass + 1));
     }
 
     /// Marks `key` as just used so it is kept longest.
     pub fn touch(&mut self, key: &K) {
         if let Some(at) = self.entries.iter().position(|(k, ..)| k == key)
-            && let Some(entry) = self.entries.remove(at)
+            && let Some(mut entry) = self.entries.remove(at)
         {
+            entry.3 = self.pass.unwrap_or(0);
             self.entries.push_back(entry);
         }
     }
 
-    /// Adds or replaces `key`, whose pixels take `bytes`, then drops the oldest until the budget holds.
+    /// Adds or replaces `key`, whose pixels take `bytes`, then drops the oldest until the budget holds or only covers
+    /// in use in the current pass are left.
     pub fn insert(&mut self, key: K, value: Option<V>, bytes: usize) {
         if let Some(at) = self.entries.iter().position(|(k, ..)| *k == key)
-            && let Some((_, _, old)) = self.entries.remove(at)
+            && let Some((_, _, old, _)) = self.entries.remove(at)
         {
             self.used -= old;
         }
-        self.entries.push_back((key, value, bytes));
+        let pass = self.pass;
+        self.entries.push_back((key, value, bytes, pass.unwrap_or(0)));
         self.used += bytes;
-        while self.used > self.limit && self.entries.len() > 1 {
-            if let Some((_, _, freed)) = self.entries.pop_front() {
+        let stale = |entry: &(K, Option<V>, usize, u64)| pass.is_none_or(|pass| entry.3 != pass);
+        while self.used > self.limit && self.entries.len() > 1 && self.entries.front().is_some_and(stale) {
+            if let Some((_, _, freed, _)) = self.entries.pop_front() {
                 self.used -= freed;
             }
         }
