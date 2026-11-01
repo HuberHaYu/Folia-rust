@@ -40,6 +40,7 @@ lofty = "0.25.5"
 lucide-static-svg = "1.65.0"
 md-5 = "=0.10.6"
 num-bigint = "=0.4.8"
+open = "=5.3.2"
 qrcode = { version = "=0.14.1", default-features = false }
 quick-xml = "0.42.0"
 rayon = "1.12.0"

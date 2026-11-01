@@ -215,6 +215,8 @@ pub enum Message {
     SignOut,
     /// Makes the chosen platform, whose session is kept, the one in use (`switchToChosen`).
     Switch,
+    /// Opens a browser sign-in's page (`openLoginPage`).
+    OpenBrowser,
     ConfirmSignOut,
     CancelSignOut,
     Qr(u64, Result<LoginQr, Failure>),
@@ -406,6 +408,15 @@ impl Login {
                 };
                 self.close();
                 (Task::none(), Some(Effect::Switch(provider)))
+            }
+            Message::OpenBrowser => {
+                let Some(url) = self.qr.as_ref().and_then(|qr| qr.browser.clone()) else { return (Task::none(), None) };
+                let open = blocking(move || {
+                    if let Err(err) = open::that_detached(&url) {
+                        tracing::warn!(error = &err as &dyn std::error::Error, "cannot open the sign-in page");
+                    }
+                });
+                (Task::perform(open, |_| Message::Swallow), None)
             }
             Message::CancelSignOut => {
                 self.asking = false;
@@ -1036,7 +1047,8 @@ impl Login {
         let pc = platform.map_or(tokens.t3, |platform| folia_visualizer::color(Rgb::hex(platform.color), tokens.t1.a));
         let spin = now.saturating_duration_since(self.clock).as_secs_f32();
         let expired = matches!(&self.phase, Phase::Failed(failure) if failure.case.expired_code()) && self.qr.is_some();
-        let on_white = (self.phase == Phase::Code && self.qr.is_some()) || expired;
+        let in_browser = self.qr.as_ref().is_some_and(|qr| qr.browser.is_some());
+        let on_white = (self.phase == Phase::Code && self.qr.is_some() && !in_browser) || expired;
         let framed = platform.is_none();
         let disc = |tone: Tone, glyph: Icon, arc: bool| -> Element<'a, Message> {
             let (fill, ink) = tone_colors(tone, tokens, look.daylight);
@@ -1072,6 +1084,9 @@ impl Login {
                     .into()
             }
             (_, Some(platform)) if signed_in => account_picture(look, platform, 88.0, tokens),
+            (Phase::Code, Some(platform)) if in_browser => {
+                container(mark_faded(platform, 54.0, tokens.t1.a)).center(Length::Fixed(88.0)).into()
+            }
             (Phase::Code, Some(_)) => match &self.qr {
                 Some(qr) => canvas_widget(Code { qr, dim: 1.0, opacity: tokens.t1.a, reveal: self.reveal(now) })
                     .width(Length::Fixed(176.0))
@@ -1182,6 +1197,10 @@ impl Login {
             }
             (Phase::Scanned, Some(_)) => i18n.t("home.qrScanned").to_owned(),
             (Phase::Reading, Some(_)) => i18n.t("login.readingAccount").to_owned(),
+            (Phase::Code, Some(_)) if self.qr.as_ref().is_some_and(|qr| qr.browser.is_some()) => {
+                actions.push((i18n.t("login.openBrowser").to_owned(), true, Message::OpenBrowser));
+                i18n.format("home.loginToProvider", &[("provider", label)])
+            }
             (Phase::Code | Phase::Preparing | Phase::Idle, Some(_)) => {
                 note = Some(i18n.t("home.loginNote").to_owned());
                 i18n.t("home.loginTitle").to_owned()

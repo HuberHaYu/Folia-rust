@@ -8,13 +8,19 @@ pub struct LoginQr {
     pub key: String,
     pub width: usize,
     pub modules: Vec<bool>,
+    /// The sign-in happens on this page in the system browser instead; there are no modules.
+    pub browser: Option<String>,
 }
 
 impl LoginQr {
     pub(crate) fn encode(key: String, url: &str) -> Result<Self, OmniError> {
         let code = qrcode::QrCode::new(url.as_bytes())?;
         let modules = code.to_colors().into_iter().map(|color| color == qrcode::Color::Dark).collect();
-        Ok(Self { key, width: code.width(), modules })
+        Ok(Self { key, width: code.width(), modules, browser: None })
+    }
+
+    pub(crate) fn browser(key: String, url: String) -> Self {
+        Self { key, width: 0, modules: Vec::new(), browser: Some(url) }
     }
 
     /// Reads the modules back from a platform's PNG of the code: the dark area is cropped, the module size taken
@@ -50,7 +56,7 @@ impl LoginQr {
                 modules.push(x < w as f32 && y < h as f32 && dark(x as u32, y as u32));
             }
         }
-        Ok(Self { key, width, modules })
+        Ok(Self { key, width, modules, browser: None })
     }
 
     pub fn dark(&self, x: usize, y: usize) -> bool {

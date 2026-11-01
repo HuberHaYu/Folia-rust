@@ -100,6 +100,8 @@ pub enum QrContent {
     Url(String),
     /// A PNG of the code as the platform drew it; its modules are read back from the picture.
     Png(Vec<u8>),
+    /// A page to open in the system browser; the platform waits for the answer it sends back.
+    Browser(String),
 }
 
 /// What the platform says about a sign-in code.
@@ -295,6 +297,7 @@ impl Omni {
         match code.content {
             QrContent::Url(url) => LoginQr::encode(code.key, &url),
             QrContent::Png(png) => LoginQr::from_png(code.key, &png),
+            QrContent::Browser(url) => Ok(LoginQr::browser(code.key, url)),
         }
     }
 

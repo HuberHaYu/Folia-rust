@@ -18,6 +18,7 @@ folia-render.workspace = true
 folia-visualizer.workspace = true
 iced.workspace = true
 lucide-static-svg.workspace = true
+open.workspace = true
 rfd.workspace = true
 tracing.workspace = true
 
