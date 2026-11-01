@@ -18,6 +18,7 @@ use crate::background::blocking;
 use crate::icons::icon;
 use crate::motion::Tween;
 use crate::online::{AccountState, PROVIDER};
+use crate::platform_icon::platform_icon;
 use crate::settings_kit::Tokens;
 
 /// `LoginWindow`: 772 wide, at least 420 high, a 212px column; Sheet keeps 16px round it.
@@ -744,7 +745,7 @@ impl Login {
         };
         let mut heading = row![].spacing(10).align_y(Alignment::Center);
         if let Some(platform) = platform {
-            heading = heading.push(mark(platform, 24.0));
+            heading = heading.push(mark_faded(platform, 24.0, tokens.t1.a));
         }
         heading = heading
             .push(text(title).size(16).font(SEMIBOLD).color(tokens.t1).wrapping(iced::widget::text::Wrapping::None));
@@ -921,10 +922,13 @@ impl Login {
                 };
                 let ok =
                     if look.daylight { Color::from_rgb8(0x1e, 0x9a, 0x5c) } else { Color::from_rgb8(0x56, 0xc9, 0x8d) };
-                row![dot(ok, 6.0), text(name).size(11.5).color(tokens.t3).wrapping(iced::widget::text::Wrapping::None)]
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .into()
+                row![
+                    dot(Color { a: tokens.t1.a, ..ok }, 6.0),
+                    text(name).size(11.5).color(tokens.t3).wrapping(iced::widget::text::Wrapping::None)
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .into()
             } else {
                 let (key, note) = if ran_out {
                     ("login.rowRanOut", warn(look.daylight))
@@ -952,7 +956,8 @@ impl Login {
                 iced::widget::image(avatar.clone())
                     .width(Length::Fixed(size))
                     .height(Length::Fixed(size))
-                    .border_radius(size / 2.0),
+                    .border_radius(size / 2.0)
+                    .opacity(tokens.t1.a),
             );
         }
         let fill2 = tokens.fill2;
@@ -1063,13 +1068,14 @@ impl Login {
                         .into(),
                     None => space().into(),
                 };
-                let knob = container(icon(Icon::RefreshCw, 22.0, Color::WHITE)).center(Length::Fixed(56.0)).style(
-                    |_theme: &Theme| container::Style {
-                        background: Some(Background::Color(Color::from_rgb8(0x17, 0x17, 0x1a))),
+                let alpha = tokens.t1.a;
+                let knob = container(icon(Icon::RefreshCw, 22.0, Color { a: alpha, ..Color::WHITE }))
+                    .center(Length::Fixed(56.0))
+                    .style(move |_theme: &Theme| container::Style {
+                        background: Some(Background::Color(Color { a: alpha, ..Color::from_rgb8(0x17, 0x17, 0x1a) })),
                         border: Border { radius: 28.0.into(), ..Border::default() },
                         ..container::Style::default()
-                    },
-                );
+                    });
                 let refresh =
                     button(stack![container(code).center(Length::Fill), container(knob).center(Length::Fill)])
                         .width(Length::Fill)
@@ -1086,7 +1092,7 @@ impl Login {
             (Phase::Scanned, Some(_)) => disc(Tone::Calm, Icon::Smartphone, false),
             (Phase::Reading, Some(_)) => disc(Tone::Calm, Icon::User, true),
             (Phase::Preparing | Phase::Idle, Some(platform)) => stack![
-                container(mark(platform, 30.0)).center(Length::Fixed(54.0)),
+                container(mark_faded(platform, 30.0, tokens.t1.a)).center(Length::Fixed(54.0)),
                 canvas_widget(Arc { line: tokens.line, pc, turn: spin })
                     .width(Length::Fixed(54.0))
                     .height(Length::Fixed(54.0)),
@@ -1288,12 +1294,16 @@ fn dot<'a>(color: Color, size: f32) -> Element<'a, Message> {
         .into()
 }
 
-/// `PlatformMark`: the platform's letter on its colour, 42% of the size, dark or white by contrast.
-fn mark<'a>(platform: Platform, size: f32) -> Element<'a, Message> {
-    mark_faded(platform, size, 1.0)
-}
-
+/// `PlatformMark`: the platform's app icon, or its letter on its colour, 42% of the size, dark or white by contrast.
 fn mark_faded<'a>(platform: Platform, size: f32, alpha: f32) -> Element<'a, Message> {
+    if let Some(handle) = platform_icon(platform.id) {
+        return iced::widget::image(handle)
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .border_radius(size / 2.0)
+            .opacity(alpha)
+            .into();
+    }
     let color = folia_visualizer::color(Rgb::hex(platform.color), alpha);
     let on = Color { a: alpha, ..on_color(platform.color) };
     container(
@@ -1359,11 +1369,13 @@ fn account_picture<'a>(look: &Look<'a>, platform: Platform, size: f32, tokens: T
     };
     let corner = (size * 0.44).round().max(14.0);
     let card = if look.daylight { Color::WHITE } else { Color::from_rgb8(0x23, 0x23, 0x27) };
-    let badge = container(mark(platform, corner)).padding(2).style(move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(card)),
-        border: Border { radius: (corner / 2.0 + 2.0).into(), ..Border::default() },
-        ..container::Style::default()
-    });
+    let card = Color { a: tokens.t1.a, ..card };
+    let badge =
+        container(mark_faded(platform, corner, tokens.t1.a)).padding(2).style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(card)),
+            border: Border { radius: (corner / 2.0 + 2.0).into(), ..Border::default() },
+            ..container::Style::default()
+        });
     // The mark sits 3px past the picture's bottom-right edge, laid out in a box that much larger.
     let reach = size + 3.0;
     stack![
@@ -1563,19 +1575,32 @@ fn flood<'a>(look: &Look<'a>, platform: Platform, ms: f64, opacity: f32, narrow:
             .into(),
         None => {
             let pc = folia_visualizer::color(Rgb::hex(platform.color), picture_in);
-            container(
-                text(platform.letter.to_string())
-                    .size(37)
-                    .font(crate::typeface::font(iced::font::Weight::Bold))
-                    .color(Color { a: picture_in, ..on }),
-            )
-            .center(Length::Fixed(88.0))
-            .style(move |_theme: &Theme| container::Style {
-                background: Some(Background::Color(pc)),
-                border: Border { radius: 44.0.into(), width: 3.0, color: Color { a: picture_in, ..Color::WHITE } },
-                ..container::Style::default()
-            })
-            .into()
+            let ring = Border { radius: 44.0.into(), width: 3.0, color: Color { a: picture_in, ..Color::WHITE } };
+            match platform_icon(platform.id) {
+                Some(handle) => container(
+                    iced::widget::image(handle)
+                        .width(Length::Fixed(82.0))
+                        .height(Length::Fixed(82.0))
+                        .border_radius(41.0)
+                        .opacity(picture_in),
+                )
+                .center(Length::Fixed(88.0))
+                .style(move |_theme: &Theme| container::Style { border: ring, ..container::Style::default() })
+                .into(),
+                None => container(
+                    text(platform.letter.to_string())
+                        .size(37)
+                        .font(crate::typeface::font(iced::font::Weight::Bold))
+                        .color(Color { a: picture_in, ..on }),
+                )
+                .center(Length::Fixed(88.0))
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(Background::Color(pc)),
+                    border: ring,
+                    ..container::Style::default()
+                })
+                .into(),
+            }
         }
     };
     let tick_badge =

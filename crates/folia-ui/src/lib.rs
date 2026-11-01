@@ -19,6 +19,7 @@ mod online;
 mod overlay;
 mod page_fade;
 mod panel;
+mod platform_icon;
 mod playback;
 mod player_bar;
 mod positioner;
@@ -1100,6 +1101,7 @@ impl Shell {
                 guest: false,
                 name: account.nickname.clone(),
                 avatar: self.library.online.avatar.as_ref(),
+                icon: platform_icon::platform_icon(platform.id),
                 letter: platform.letter,
                 mark,
                 tip: format!("{} · {label} · {}", self.i18n.t("home.switchOnlineProvider"), account.nickname),
@@ -1108,6 +1110,7 @@ impl Shell {
                 guest: true,
                 name: self.i18n.t("libraryBravaisHome.connect").to_owned(),
                 avatar: None,
+                icon: platform_icon::platform_icon(platform.id),
                 letter: platform.letter,
                 mark,
                 tip: format!(

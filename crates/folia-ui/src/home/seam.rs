@@ -313,7 +313,8 @@ fn account_entry<'a>(slot: &AccountSlot<'a>, ink: Color, spine: bool) -> Element
     iced::widget::Tooltip::new(entry, text(slot.tip.clone()).size(12), iced::widget::tooltip::Position::Right).into()
 }
 
-/// `BravaisProviderAvatar`: the picture, the platform's letter on its colour, or a plug on a pale disc for a guest.
+/// `BravaisProviderAvatar`: the picture, the platform's icon or letter on its colour, or a plug on a pale disc for a
+/// guest.
 fn avatar<'a>(slot: &AccountSlot<'a>, size: f32, ink: Color) -> Element<'a, Message> {
     if slot.guest {
         return container(icon(Icon::Plug, 16.0, ink))
@@ -325,7 +326,7 @@ fn avatar<'a>(slot: &AccountSlot<'a>, size: f32, ink: Color) -> Element<'a, Mess
             })
             .into();
     }
-    if let Some(handle) = slot.avatar {
+    if let Some(handle) = slot.avatar.or(slot.icon.as_ref()) {
         return iced::widget::image(handle.clone())
             .width(Length::Fixed(size))
             .height(Length::Fixed(size))

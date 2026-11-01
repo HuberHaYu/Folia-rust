@@ -600,6 +600,8 @@ pub struct AccountSlot<'a> {
     pub guest: bool,
     pub name: String,
     pub avatar: Option<&'a iced::widget::image::Handle>,
+    /// The platform's app icon, drawn in place of its letter.
+    pub icon: Option<iced::widget::image::Handle>,
     pub letter: char,
     pub mark: Color,
     pub tip: String,
