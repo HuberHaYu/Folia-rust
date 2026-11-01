@@ -17,6 +17,10 @@ pub struct Playback {
     pub lyrics: Option<Lyrics>,
     pub status: Status,
     pub settings: PlaybackSettings,
+    /// Silenced without losing `settings.volume`, like the original `isMuted`.
+    pub muted: bool,
+    /// Seconds the playing song's lyrics are moved later (`lyricTimelineOffsetMs`); every song starts at 0.
+    pub lyric_offset: f64,
     seeking: Option<f64>,
     /// Tracks that failed one after another; playback stops once the whole queue has failed.
     failures: usize,
@@ -29,9 +33,21 @@ pub enum Message {
     Previous,
     Seeking(f64),
     SeekDone,
+    /// Sets the level; moving the volume also lifts a mute.
     Volume(f32),
+    ToggleMute,
+    /// Sets the lyric timeline offset, in seconds.
+    LyricOffset(f64),
     VolumeDone,
     CycleRepeat,
+    /// Plays the queue item at `index`.
+    Jump(usize),
+    /// Removes the queue item at `index`. Removing the current item starts whatever takes its place.
+    Remove(usize),
+    /// Moves the queue item at `index` to immediately after the current item.
+    MoveNext(usize),
+    /// Moves the queue item at `index` to the end of the queue.
+    MoveEnd(usize),
     Tick,
     LyricsLoaded(i64, Option<Lyrics>),
     AudioReady(i64, Result<PathBuf, String>),
@@ -52,7 +68,18 @@ impl Playback {
         let mut queue = Queue::default();
         queue.repeat = settings.repeat;
         let status = Status { state: PlayerState::Idle, position: 0.0, duration: 0.0 };
-        Self { player, omni, queue, lyrics: None, status, settings, seeking: None, failures: 0 }
+        Self {
+            player,
+            omni,
+            queue,
+            lyrics: None,
+            status,
+            settings,
+            muted: false,
+            lyric_offset: 0.0,
+            seeking: None,
+            failures: 0,
+        }
     }
 
     pub fn current(&self) -> Option<&Track> {
@@ -68,6 +95,11 @@ impl Playback {
         self.seeking.unwrap_or(self.status.position)
     }
 
+    /// The time the lyrics are drawn at: a positive offset holds them back (`audioTime - offset`).
+    pub fn lyric_time(&self) -> f64 {
+        self.position() - self.lyric_offset
+    }
+
     pub fn duration(&self) -> f64 {
         if self.status.duration > 0.0 {
             self.status.duration
@@ -76,9 +108,12 @@ impl Playback {
         }
     }
 
-    /// Replaces the queue with `tracks` and plays the one at `index`.
-    pub fn play(&mut self, tracks: Vec<Track>, index: usize) -> Task<Message> {
-        self.queue.replace(tracks, index);
+    /// Replaces the queue with `tracks` and plays the one at `index`. `origin` is where they were started.
+    pub fn play(&mut self, tracks: Vec<Track>, index: usize, origin: Option<folia_core::Origin>) -> Task<Message> {
+        match origin {
+            Some(origin) => self.queue.replace_from(tracks, index, origin),
+            None => self.queue.replace(tracks, index),
+        }
         self.start_current()
     }
 
@@ -108,7 +143,18 @@ impl Playback {
             }
             Message::Volume(volume) => {
                 self.settings.volume = volume;
+                self.muted = false;
                 self.with_player(|player| player.set_volume(volume));
+                Task::none()
+            }
+            Message::LyricOffset(seconds) => {
+                self.lyric_offset = seconds;
+                Task::none()
+            }
+            Message::ToggleMute => {
+                self.muted = !self.muted;
+                let level = if self.muted { 0.0 } else { self.settings.volume };
+                self.with_player(|player| player.set_volume(level));
                 Task::none()
             }
             Message::VolumeDone => save(store, &self.settings),
@@ -120,6 +166,28 @@ impl Playback {
                 };
                 self.queue.repeat = self.settings.repeat;
                 save(store, &self.settings)
+            }
+            Message::Jump(index) => {
+                if self.queue.select(index).is_some() {
+                    self.start_current()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::Remove(index) => {
+                let current = self.queue.current_index() == Some(index);
+                if self.queue.remove(index).is_none() {
+                    return Task::none();
+                }
+                if current { self.start_current() } else { Task::none() }
+            }
+            Message::MoveNext(index) => {
+                self.queue.move_after_current(index);
+                Task::none()
+            }
+            Message::MoveEnd(index) => {
+                self.queue.move_to_end(index);
+                Task::none()
             }
             Message::Tick => self.tick(),
             Message::LyricsLoaded(id, lyrics) => {
@@ -161,11 +229,6 @@ impl Playback {
         if forward {
             return self.advance(false);
         }
-        // Like most players, "previous" restarts the track unless it has only just begun.
-        if self.status.position > 3.0 {
-            self.with_player(|player| player.seek(0.0));
-            return Task::none();
-        }
         if self.queue.back().is_some() { self.start_current() } else { Task::none() }
     }
 
@@ -193,6 +256,7 @@ impl Playback {
     fn start_current(&mut self) -> Task<Message> {
         let Some(track) = self.queue.current().cloned() else { return Task::none() };
         self.lyrics = None;
+        self.lyric_offset = 0.0;
         self.seeking = None;
         tracing::info!(track = %track.display_name(), "playing");
         let id = track.id;

@@ -2,6 +2,16 @@
 name = "Folia"
 
 [options]
+save = "Save"
+playerBottomBarPositioningHint = "Drag the bar to set its height"
+playerBottomBarRepositionUnavailable = "Play something first — the control bar has to be on screen to move it"
+playerBottomBarReposition = "Reposition on player page"
+playerBottomBarReset = "Reset height"
+playerBottomBarOffsetDesc = "Adjusts bottom controls, song cards, action buttons and side panels across every page; player subtitles follow too. Capped at half the screen."
+playerBottomBarOffset = "Bottom controls height"
+settingsHeadingControlBar = "Control bar"
+settingsPagePlayer = "Player page"
+playerControlSlotAction_lyricsTimeline = "Lyrics timeline"
 appLanguage = "Interface language"
 appLanguageSystem = "Follow system"
 appLanguageZhCN = "Simplified Chinese"
@@ -33,6 +43,14 @@ visualizerFrameRateValue = "Limit"
 appLanguageSystemHint = "Current: {{language}}"
 lyricsAnimationAdjust = "Lyrics Animation Adjust"
 settingsWindowName = "Settings"
+visualizerBackgroundMode = "Background Type"
+visualizerBackgroundModeCommon = "Common"
+transparentPlayerBackground = "Transparent player background"
+customTheme = "Custom"
+customThemeUnavailable = "No custom theme yet"
+themeQuickEditUnavailable = "The default theme cannot be edited"
+randomVisualizerReroll = "Draw another style from the pool"
+randomPoolChoose = "Choose random pool"
 
 [player]
 play = "Play"
@@ -40,10 +58,13 @@ pause = "Pause"
 loopOff = "Loop off"
 loopAll = "Loop all"
 loopOne = "Loop one"
+like = "Like"
+unlike = "Unlike"
 unknownArtist = "Unknown Artist"
 unknownAlbum = "Unknown Album"
 
 [ui]
+cancel = "Cancel"
 searching = "Searching..."
 previousTrack = "Previous track"
 nextTrack = "Next track"
@@ -66,21 +87,117 @@ minimizeWindow = "Minimize"
 maximizeWindow = "Maximize"
 restoreWindow = "Restore"
 close = "Close"
+backToHome = "Back to Home"
+automix = "Smart transition"
+equalizerTitle = "Audio effects"
+playingFrom = "Playing from {{name}}"
+animationIntensity = "Animation Intensity"
+moreSettings = "More settings"
+animationMode = "Lyrics Style"
+default = "Default"
+aiTheme = "AI Theme"
+generateAITheme = "Generate AI Theme"
 
 [localMusic]
+resetLyricTimelineOffset = "Reset timeline offset"
 allSongs = "All Songs"
 importFolder = "Import Folder"
 importing = "Importing..."
 noLocalMusic = "No local music imported yet"
 reload = "Reload"
+folder = "Folder"
+lyrics = "Lyrics"
+matchOnline = "Match Online"
+statusNone = "None"
+statusOnline = "Online"
+statusLocal = "Local"
+addToPlaylist = "Add to Playlist"
+replayGainOff = "Off"
+replayGainTrack = "Track"
+replayGainAlbum = "Album"
+replayGainAuto = "Smart"
+replayGainUnavailable = "No ReplayGain detected"
+replayGainTitle = "Audio Gain"
+lyricTimelineOffset = "Timeline Offset"
 
 [search]
 placeholder = "Search songs..."
 error = "Search failed. Please try again."
+retry = "Retry"
+sourceLocal = "Local"
+sourceNetease = "NetEase"
+
+[libraryBravais]
+homeTitle = "Library"
+seamFold = "Fold"
+seamExpand = "Expand"
 
 [libraryBravaisHome]
 search = "Search"
 searchSubmit = "Search"
+settings = "Settings"
+more = "More"
+backToPlayer = "Back to the player"
+
+[wallTools]
+queue = "Play queue"
+openPlayer = "Open the player"
+openPlayerUnavailable = "Nothing is playing yet"
+openSettings = "Open settings"
+shuffle = "Shuffle the queue"
+shuffleUnavailable = "Needs two or more songs in the queue (not in Personal FM)"
+theme = "Generate a theme for this song"
+themeUnavailable = "Needs a playing song with lyrics (or pure music)"
+mute = "Mute"
+unmute = "Unmute"
+muted = "Muted"
 
 [home]
 loading = "Loading..."
+lattice = "Queue collage"
+noResults = "No results found."
+
+[panel]
+cover = "Cover"
+controls = "Controls"
+playlist = "Playlist"
+account = "Quality"
+
+[queue]
+remove = "Remove from queue"
+moveToEnd = "Move to end"
+playNext = "Play next"
+empty = "Queue is empty"
+title = "Play Queue"
+shuffle = "Shuffle Queue"
+
+[animation]
+calm = "calm"
+normal = "normal"
+chaotic = "chaotic"
+
+[theme]
+midnightDefault = "Midnight Default"
+daylightDefault = "Daylight Default"
+
+[status]
+songUnavailableTag = "Unavailable"
+songVideoTag = "MV"
+providerLikeUnavailable = "{{provider}} does not support liking songs."
+providerPlaylistMutationUnavailable = "{{provider}} does not support adding songs to playlists."
+
+[account]
+guestMode = "Guest Mode"
+loginOnHome = "Login on Home"
+audioQuality = "Default Quality"
+qualityStandard = "Standard"
+qualityExhigh = "Very High"
+qualityUltra = "Ultra High"
+qualityLossless = "Lossless"
+qualityHires = "Hi-Res"
+
+[lyricFile]
+button = "Import / export lyrics"
+
+[lyricProvider]
+netease = "NetEase Cloud Music"

@@ -4,7 +4,7 @@ mod cover;
 mod lyrics;
 mod tags;
 
-pub use cover::{Cover, cover_for};
+pub use cover::{Cover, CoverCache, cover_for, cover_rgba};
 pub use lyrics::{decode_text, lyrics_for};
 pub use tags::read as read_track;
 
@@ -197,6 +197,7 @@ impl Library {
                 disc_no: row.get(7)?,
                 duration: row.get(8)?,
                 online: None,
+                cover_url: None,
             })
         })?;
         Ok(tracks.collect::<Result<_, _>>()?)

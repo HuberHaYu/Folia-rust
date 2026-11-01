@@ -2,12 +2,14 @@
 
 mod frame;
 mod pipeline;
+mod plate;
 mod wash;
 
 pub use frame::grain_frame;
+pub use plate::Plate;
 pub use wash::{Glow, Veil, Wash};
 
-use pipeline::Fullscreen;
+use pipeline::{Fullscreen, Slot};
 
 use std::marker::PhantomData;
 
@@ -50,7 +52,11 @@ impl<Message> shader::Program<Message> for Program<Message> {
     type Primitive = Pass;
 
     fn draw(&self, _state: &Self::State, _cursor: mouse::Cursor, bounds: Rectangle) -> Self::Primitive {
-        Pass { atmosphere: self.atmosphere, size: [bounds.width.max(1.0), bounds.height.max(1.0)] }
+        Pass {
+            atmosphere: self.atmosphere,
+            size: [bounds.width.max(1.0), bounds.height.max(1.0)],
+            slot: Slot::default(),
+        }
     }
 }
 
@@ -58,6 +64,7 @@ impl<Message> shader::Program<Message> for Program<Message> {
 pub struct Pass {
     atmosphere: Atmosphere,
     size: [f32; 2],
+    slot: Slot,
 }
 
 #[repr(C)]
@@ -84,7 +91,7 @@ impl ShaderPrimitive for Pass {
     fn prepare(
         &self,
         pipeline: &mut Self::Pipeline,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _bounds: &Rectangle,
         _viewport: &iced::widget::shader::Viewport,
@@ -103,11 +110,11 @@ impl ShaderPrimitive for Pass {
             _pad0: 0.0,
             _pad1: 0.0,
         };
-        queue.write_buffer(&pipeline.0.uniform, 0, bytemuck::bytes_of(&uniforms));
+        pipeline.0.write(device, queue, &self.slot, bytemuck::bytes_of(&uniforms));
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        pipeline.0.draw(pass);
+        pipeline.0.draw(pass, &self.slot);
         true
     }
 }
@@ -115,5 +122,9 @@ impl ShaderPrimitive for Pass {
 impl shader::Pipeline for Gpu {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self(Fullscreen::new(device, format, "folia-atmosphere", SHADER, "fs_overlay", std::mem::size_of::<Uniforms>()))
+    }
+
+    fn trim(&mut self) {
+        self.0.trim();
     }
 }

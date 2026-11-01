@@ -2,6 +2,16 @@
 name = "Folia"
 
 [options]
+save = "Simpan"
+playerBottomBarPositioningHint = "Seret bilah untuk mengatur ketinggiannya"
+playerBottomBarRepositionUnavailable = "Putar lagu dulu — bilah kontrol harus tampil untuk bisa dipindahkan"
+playerBottomBarReposition = "Atur posisi di halaman pemutar"
+playerBottomBarReset = "Setel ulang ketinggian"
+playerBottomBarOffsetDesc = "Menyesuaikan kontrol bawah, kartu lagu, tombol tindakan, dan panel samping di semua halaman; subtitle pemutar juga ikut bergerak. Dibatasi setengah layar."
+playerBottomBarOffset = "Ketinggian kontrol bawah"
+settingsHeadingControlBar = "Bilah kontrol"
+settingsPagePlayer = "Halaman pemutar"
+playerControlSlotAction_lyricsTimeline = "Linimasa lirik"
 appLanguage = "Bahasa antarmuka"
 appLanguageSystem = "Ikuti sistem"
 appLanguageZhCN = "Tionghoa Sederhana"
@@ -33,6 +43,14 @@ visualizerFrameRateValue = "Batas"
 appLanguageSystemHint = "Saat ini: {{language}}"
 lyricsAnimationAdjust = "Sesuaikan Animasi Lirik"
 settingsWindowName = "Pengaturan"
+visualizerBackgroundMode = "Jenis Latar Belakang"
+visualizerBackgroundModeCommon = "Umum"
+transparentPlayerBackground = "Latar belakang pemutar transparan"
+customTheme = "Kustom"
+customThemeUnavailable = "Belum ada tema kustom"
+themeQuickEditUnavailable = "Tema bawaan tidak dapat diedit"
+randomVisualizerReroll = "Ambil gaya lain dari kumpulan"
+randomPoolChoose = "Pilih kumpulan acak"
 
 [player]
 play = "Putar"
@@ -40,10 +58,13 @@ pause = "Jeda"
 loopOff = "Ulangi Mati"
 loopAll = "Ulangi Semua"
 loopOne = "Ulangi Satu"
+like = "Suka"
+unlike = "Batal Suka"
 unknownArtist = "Artis Tidak Dikenal"
 unknownAlbum = "Album Tidak Dikenal"
 
 [ui]
+cancel = "Batal"
 searching = "Mencari..."
 previousTrack = "Lagu sebelumnya"
 nextTrack = "Lagu berikutnya"
@@ -66,21 +87,117 @@ minimizeWindow = "Minimalkan"
 maximizeWindow = "Maksimalkan"
 restoreWindow = "Pulihkan"
 close = "Tutup"
+backToHome = "Kembali ke Beranda"
+automix = "Transisi pintar"
+equalizerTitle = "Efek audio"
+playingFrom = "Diputar dari {{name}}"
+animationIntensity = "Intensitas Animasi"
+moreSettings = "Pengaturan lainnya"
+animationMode = "Gaya Lirik"
+default = "Bawaan"
+aiTheme = "Tema AI"
+generateAITheme = "Buat Tema AI"
 
 [localMusic]
+resetLyricTimelineOffset = "Reset offset timeline"
 allSongs = "Semua Lagu"
 importFolder = "Impor Folder"
 importing = "Mengimpor..."
 noLocalMusic = "Belum ada musik lokal yang diimpor"
 reload = "Muat Ulang"
+folder = "Folder"
+lyrics = "Lirik"
+matchOnline = "Cocokkan Online"
+statusNone = "Tidak Ada"
+statusOnline = "Online"
+statusLocal = "Lokal"
+addToPlaylist = "Tambahkan ke Playlist"
+replayGainOff = "Mati"
+replayGainTrack = "Trek"
+replayGainAlbum = "Album"
+replayGainAuto = "Pintar"
+replayGainUnavailable = "Tidak ada ReplayGain terdeteksi"
+replayGainTitle = "Penguatan Audio"
+lyricTimelineOffset = "Offset Timeline"
 
 [search]
 placeholder = "Cari lagu..."
 error = "Pencarian gagal. Silakan coba lagi."
+retry = "Coba Lagi"
+sourceLocal = "Lokal"
+sourceNetease = "NetEase"
+
+[libraryBravais]
+homeTitle = "Pustaka"
+seamFold = "Lipat"
+seamExpand = "Bentangkan"
 
 [libraryBravaisHome]
 search = "Cari"
 searchSubmit = "Cari"
+settings = "Pengaturan"
+more = "Lainnya"
+backToPlayer = "Kembali ke pemutar"
+
+[wallTools]
+queue = "Antrean putar"
+openPlayer = "Buka pemutar"
+openPlayerUnavailable = "Belum ada lagu yang diputar"
+openSettings = "Buka pengaturan"
+shuffle = "Acak antrean"
+shuffleUnavailable = "Perlu dua lagu atau lebih di antrean (tidak di FM Pribadi)"
+theme = "Buat tema untuk lagu ini"
+themeUnavailable = "Perlu lagu yang diputar dengan lirik (atau musik instrumental)"
+mute = "Bisukan"
+unmute = "Bunyikan"
+muted = "Dibisukan"
 
 [home]
 loading = "Memuat..."
+lattice = "Kolase antrean"
+noResults = "Tidak ada hasil ditemukan."
+
+[panel]
+cover = "Sampul"
+controls = "Kontrol"
+playlist = "Playlist"
+account = "Kualitas"
+
+[queue]
+remove = "Hapus dari antrean"
+moveToEnd = "Pindah ke akhir"
+playNext = "Putar berikutnya"
+empty = "Antrean kosong"
+title = "Antrean Putar"
+shuffle = "Acak Antrean"
+
+[animation]
+calm = "tenang"
+normal = "normal"
+chaotic = "kacau"
+
+[theme]
+midnightDefault = "Bawaan Tengah Malam"
+daylightDefault = "Bawaan Siang Hari"
+
+[status]
+songUnavailableTag = "Tidak Tersedia"
+songVideoTag = "MV"
+providerLikeUnavailable = "{{provider}} tidak mendukung fitur menyukai lagu."
+providerPlaylistMutationUnavailable = "{{provider}} tidak mendukung penambahan lagu ke playlist."
+
+[account]
+guestMode = "Mode Tamu"
+loginOnHome = "Login di Beranda"
+audioQuality = "Kualitas Default"
+qualityStandard = "Standar"
+qualityExhigh = "Sangat Tinggi"
+qualityUltra = "Ultra Tinggi"
+qualityLossless = "Lossless"
+qualityHires = "Hi-Res"
+
+[lyricFile]
+button = "Impor / ekspor lirik"
+
+[lyricProvider]
+netease = "NetEase Cloud Music"

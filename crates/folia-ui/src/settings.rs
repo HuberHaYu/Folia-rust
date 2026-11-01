@@ -32,6 +32,7 @@ const LIMIT_WHEN_SWITCHED_ON: FrameRate = FrameRate::Fps120;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Appearance,
+    Player,
     General,
     Graphics,
 }
@@ -40,6 +41,7 @@ impl Section {
     fn label_key(self) -> &'static str {
         match self {
             Section::Appearance => "options.settingsPageAppearance",
+            Section::Player => "options.settingsPagePlayer",
             Section::General => "options.settingsPageGeneral",
             Section::Graphics => "options.settingsPageGraphics",
         }
@@ -48,6 +50,7 @@ impl Section {
     fn icon(self) -> Icon {
         match self {
             Section::Appearance => Icon::Contrast,
+            Section::Player => Icon::MonitorPlay,
             Section::General => Icon::SlidersHorizontal,
             Section::Graphics => Icon::Gauge,
         }
@@ -56,7 +59,7 @@ impl Section {
 
 /// The side list's groups, `SETTINGS_NAV_GROUP_SPECS` without the categories Folia-rust has nothing on yet.
 const NAV: [(&str, &[Section]); 2] = [
-    ("options.settingsGroupInterface", &[Section::Appearance]),
+    ("options.settingsGroupInterface", &[Section::Appearance, Section::Player]),
     ("options.settingsGroupApp", &[Section::General, Section::Graphics]),
 ];
 
@@ -71,13 +74,16 @@ struct GroupDef {
 const LYRICS: GroupDef = GroupDef { id: "lyricsRenderer", title: "options.lyricsRenderer", bare: true };
 const THEME: GroupDef = GroupDef { id: "themePresets", title: "options.settingsHeadingTheme", bare: false };
 const LANGUAGE: GroupDef = GroupDef { id: "languageSettings", title: "options.languageSettings", bare: true };
+const BAR: GroupDef = GroupDef { id: "bottomUiSettings", title: "options.settingsHeadingControlBar", bare: false };
 const PERFORMANCE: GroupDef =
     GroupDef { id: "graphicsPerformance", title: "options.labPerformanceSection", bare: false };
 
 /// Every option the pages draw, in page order: what the search finds.
-const OPTIONS: [(Section, GroupDef, &str); 5] = [
+const OPTIONS: [(Section, GroupDef, &str); 7] = [
     (Section::Appearance, LYRICS, "options.lyricsAnimationAdjust"),
     (Section::Appearance, THEME, "options.daylightMode"),
+    (Section::Player, BAR, "options.playerBottomBarOffset"),
+    (Section::Player, BAR, "options.playerBottomBarReposition"),
     (Section::General, LANGUAGE, "options.appLanguage"),
     (Section::Graphics, PERFORMANCE, "options.visualizerFrameRate"),
     (Section::Graphics, PERFORMANCE, "options.visualizerFrameRateValue"),
@@ -119,6 +125,11 @@ pub struct Values<'a> {
     pub resolved: Language,
     pub appearance: &'a AppearanceSettings,
     pub style: Option<Style>,
+    /// `playerBottomBarOffset` and its limit for this window.
+    pub bar_offset: f32,
+    pub bar_max: f32,
+    /// A song is loaded, so the bar is on screen to be dragged.
+    pub has_track: bool,
 }
 
 pub struct Settings {
@@ -498,32 +509,9 @@ impl Settings {
         scrollable(body)
             .id(SCROLL)
             .height(Length::Fill)
-            .direction(scrollable::Direction::Vertical(
-                scrollable::Scrollbar::new().width(4).scroller_width(4).margin(4),
-            ))
+            .direction(crate::settings_kit::scrollbar())
             .on_scroll(|viewport| crate::Message::Settings(Message::Scrolled(viewport.absolute_offset().y)))
-            .style(move |_, _| {
-                let rail = scrollable::Rail {
-                    background: None,
-                    border: Border::default(),
-                    scroller: scrollable::Scroller {
-                        background: tokens.fill2.into(),
-                        border: Border { radius: 2.0.into(), ..Border::default() },
-                    },
-                };
-                scrollable::Style {
-                    container: container::Style::default(),
-                    vertical_rail: rail,
-                    horizontal_rail: rail,
-                    gap: None,
-                    auto_scroll: scrollable::AutoScroll {
-                        background: Color::TRANSPARENT.into(),
-                        border: Border::default(),
-                        shadow: Shadow::default(),
-                        icon: Color::TRANSPARENT,
-                    },
-                }
-            })
+            .style(crate::settings_kit::scroll_style(tokens))
             .into()
     }
 
@@ -566,6 +554,51 @@ impl Settings {
                     ),
                     group(THEME, vec![row("options.daylightMode", None, false, daylight)]),
                 ]
+            }
+            Section::Player => {
+                // `PlayerPage` control bar: the height with its reset, and dragging the bar on the player page.
+                let base = folia_store::BOTTOM_BAR_BASE;
+                let reset = if values.bar_offset > base {
+                    kit::icon_button(tokens, Icon::RotateCcw, 15.0, crate::Message::BarOffsetReset)
+                } else {
+                    container(icon(Icon::RotateCcw, 15.0, Color { a: tokens.t2.a * 0.4, ..tokens.t2 }))
+                        .center(32)
+                        .into()
+                };
+                let slider = iced::widget::slider(
+                    base..=values.bar_max.max(base + 1.0),
+                    values.bar_offset,
+                    crate::Message::BarOffset,
+                )
+                .on_release(crate::Message::BarOffsetDone)
+                .step(1.0_f32)
+                .width(Length::Fixed(160.0))
+                .style(move |_, _| kit::slider_style(tokens));
+                let height =
+                    iced::widget::row![reset, slider, kit::value(tokens, format!("{}px", values.bar_offset.round()))]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center);
+                let reposition = if values.has_track {
+                    kit::icon_button(tokens, Icon::ChevronRight, 16.0, crate::Message::StartPositioning)
+                } else {
+                    container(icon(Icon::ChevronRight, 16.0, Color { a: tokens.t2.a * 0.4, ..tokens.t2 }))
+                        .center(32)
+                        .into()
+                };
+                let unavailable =
+                    (!values.has_track).then(|| i18n.t("options.playerBottomBarRepositionUnavailable").to_owned());
+                vec![group(
+                    BAR,
+                    vec![
+                        row(
+                            "options.playerBottomBarOffset",
+                            Some(i18n.t("options.playerBottomBarOffsetDesc").to_owned()),
+                            false,
+                            height.into(),
+                        ),
+                        row("options.playerBottomBarReposition", unavailable, false, reposition),
+                    ],
+                )]
             }
             Section::General => {
                 let languages: Vec<_> = std::iter::once(LanguagePreference::System)

@@ -35,14 +35,23 @@ struct Block<'a> {
     gap_above: f32,
 }
 
-pub fn draw(scene: &Scene<'_>, state: &StillCache, renderer: &Renderer, size: Size) -> Geometry {
+/// Draws into `target`; the layout is made for `size` and scaled down to cover `target` when they differ.
+pub fn draw(scene: &Scene<'_>, state: &StillCache, renderer: &Renderer, target: Size, size: Size) -> Geometry {
     let index = current_index(scene.lyrics, scene.time);
-    let key = Some((index, size.width.to_bits(), size.height.to_bits(), scene.font_scale.to_bits()));
+    let key = Some((index, target.width.to_bits(), target.height.to_bits(), scene.font_scale.to_bits()));
     if state.key.replace(key) != key {
         state.cache.clear();
     }
-    state.cache.draw(renderer, size, |frame| {
-        frame.fill_rectangle(Point::ORIGIN, size, color(scene.theme.background, 1.0));
+    let scale = (target.width / size.width).max(target.height / size.height);
+    state.cache.draw(renderer, target, |frame| {
+        frame.fill_rectangle(Point::ORIGIN, target, color(scene.theme.background, 1.0));
+        if (scale - 1.0).abs() > f32::EPSILON {
+            frame.translate(iced::Vector::new(
+                (target.width - size.width * scale) / 2.0,
+                (target.height - size.height * scale) / 2.0,
+            ));
+            frame.scale(scale);
+        }
         vignette(frame, size);
         draw_lines(frame, scene, index, size);
     })

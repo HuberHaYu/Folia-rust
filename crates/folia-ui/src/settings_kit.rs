@@ -1,7 +1,7 @@
 // The settings window's parts, after the original `modal/settings/kit`: colours, rows in cards, switch, choice, list, tabs.
 
 use folia_core::{Rgb, Theme};
-use iced::widget::{button, column, container, pick_list, row, space, stack, text};
+use iced::widget::{button, column, container, pick_list, row, scrollable, space, stack, text};
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Padding, Shadow, Vector};
 
 use crate::icons::icon;
@@ -23,6 +23,8 @@ pub struct Tokens {
     pub side: Color,
     pub card: Color,
     pub menu: Color,
+    /// `--st-pv`, behind a picture.
+    pub pv: Color,
     pub raise: Color,
     pub knob: Color,
     pub t1: Color,
@@ -54,6 +56,7 @@ impl Tokens {
             side: pick(0xe9e9eb, 0x141416),
             card: pick(0xffffff, 0x232327),
             menu: pick(0xffffff, 0x2b2b30),
+            pv: pick(0xececef, 0x151517),
             raise: pick(0xffffff, 0x45454c),
             knob: pick(0xffffff, 0xececee),
             t1: ink(1.0),
@@ -80,6 +83,7 @@ impl Tokens {
             side: fade(self.side),
             card: fade(self.card),
             menu: fade(self.menu),
+            pv: fade(self.pv),
             raise: fade(self.raise),
             knob: fade(self.knob),
             t1: fade(self.t1),
@@ -390,4 +394,52 @@ fn contrast(a: Rgb, b: Rgb) -> f32 {
     };
     let (la, lb) = (luminance(a), luminance(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// `st-scroll`: a 12px gutter holding a 4px rounded `--st-fill2` thumb on no track.
+pub fn scrollbar() -> scrollable::Direction {
+    scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).margin(4))
+}
+
+pub fn scroll_style(tokens: Tokens) -> impl Fn(&iced::Theme, scrollable::Status) -> scrollable::Style {
+    move |_, _| {
+        let rail = scrollable::Rail {
+            background: None,
+            border: Border::default(),
+            scroller: scrollable::Scroller {
+                background: tokens.fill2.into(),
+                border: Border { radius: 2.0.into(), ..Border::default() },
+            },
+        };
+        scrollable::Style {
+            container: container::Style::default(),
+            vertical_rail: rail,
+            horizontal_rail: rail,
+            gap: None,
+            auto_scroll: scrollable::AutoScroll {
+                background: Color::TRANSPARENT.into(),
+                border: Border::default(),
+                shadow: Shadow::default(),
+                icon: Color::TRANSPARENT,
+            },
+        }
+    }
+}
+
+/// The kit slider (`PanelSlider`): a 4px `--st-track` rail filled with `--st-accent`, a 16px white thumb with a 14% black ring.
+pub fn slider_style(tokens: Tokens) -> iced::widget::slider::Style {
+    let alpha = tokens.t1.a;
+    iced::widget::slider::Style {
+        rail: iced::widget::slider::Rail {
+            backgrounds: (Background::Color(tokens.accent), Background::Color(tokens.track)),
+            width: 4.0,
+            border: Border { radius: 2.0.into(), ..Border::default() },
+        },
+        handle: iced::widget::slider::Handle {
+            shape: iced::widget::slider::HandleShape::Circle { radius: 8.0 },
+            background: Background::Color(Color { a: alpha, ..Color::WHITE }),
+            border_width: 1.0,
+            border_color: Color { a: 0.14 * alpha, ..Color::BLACK },
+        },
+    }
 }

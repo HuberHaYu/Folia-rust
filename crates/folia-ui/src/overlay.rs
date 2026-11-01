@@ -10,8 +10,10 @@ pub const CHROME_LEAVE_MS: u64 = 300;
 pub const CAPSULE_EXPAND_MS: u64 = 20;
 /// Time outside the capsule before it collapses, from the original 100ms delay.
 pub const CAPSULE_COLLAPSE_MS: u64 = 100;
-/// Expand/collapse animation, from the original 0.26s ease-out.
+/// Capsule showing and hiding with the player chrome, the original 0.26s `easeOut`.
 pub const CAPSULE_FADE_MS: u64 = 260;
+/// By then the layout spring is within 0.05px of a 160px move (decay `e^(-12t)`).
+pub const CAPSULE_SETTLE_MS: u64 = 700;
 /// Widest expanded capsule, the original `32rem`.
 pub const CAPSULE_MAX: f32 = 512.0;
 
@@ -100,20 +102,20 @@ impl CapsuleHover {
     }
 }
 
-/// Width animation of the capsule. `value` is the linear progress at `now_ms`, before easing.
+/// Size of the capsule between collapsed (0) and expanded (1), moved by the original layout spring.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CapsuleFade {
+pub struct CapsuleSpring {
     pub from: f32,
     pub to: f32,
     pub started_ms: u64,
 }
 
-impl CapsuleFade {
+impl CapsuleSpring {
     pub fn settled(value: f32, now_ms: u64) -> Self {
         Self { from: value, to: value, started_ms: now_ms }
     }
 
-    /// Starts a new 260ms run when `to` changes. The same target leaves the clock alone.
+    /// Releases the spring towards `to` from where it is now. The same target leaves it running.
     pub fn retarget(self, now_ms: u64, to: f32) -> Self {
         if (self.to - to).abs() < 0.001 {
             return self;
@@ -121,17 +123,18 @@ impl CapsuleFade {
         Self { from: self.value(now_ms), to, started_ms: now_ms }
     }
 
+    /// `CONTROL_LAYOUT_SPRING`: stiffness 280, damping 24, unit mass. It overshoots a little.
     pub fn value(self, now_ms: u64) -> f32 {
-        let span = self.to - self.from;
-        if span.abs() < 0.001 {
+        let elapsed = now_ms.saturating_sub(self.started_ms) as f64 / 1000.0;
+        if elapsed * 1000.0 >= CAPSULE_SETTLE_MS as f64 {
             return self.to;
         }
-        let t = (now_ms.saturating_sub(self.started_ms) as f32 / CAPSULE_FADE_MS as f32).clamp(0.0, 1.0);
-        self.from + span * t
+        let value = folia_visualizer::spring(f64::from(self.from), f64::from(self.to), elapsed, 280.0, 24.0);
+        value as f32
     }
 
     pub fn running(self, now_ms: u64) -> bool {
-        (self.value(now_ms) - self.to).abs() > 0.001
+        (self.from - self.to).abs() > 0.001 && now_ms.saturating_sub(self.started_ms) < CAPSULE_SETTLE_MS
     }
 }
 
@@ -140,18 +143,17 @@ pub fn capsule_open(hovered: bool, playing: bool, has_duration: bool) -> bool {
     hovered || (has_duration && !playing)
 }
 
-/// Cubic ease-out over the unit interval, standing in for the original `easeOut` curve.
-pub fn ease_out(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+/// The capsule's row: `min(32rem, 100vw)` less `px-4` on the playing page, `min(32rem, 100vw - 120px)` on home.
+pub fn capsule_row(window_width: f32, home: bool) -> f32 {
+    let row = if home { CAPSULE_MAX.min(window_width - 120.0) } else { window_width.min(CAPSULE_MAX) - 32.0 };
+    row.max(0.0)
 }
 
-/// Capsule width. At 768px and wider the collapsed bar is 60% of the expanded one, otherwise 80%.
-pub fn capsule_width(window_width: f32, openness: f32) -> f32 {
-    let full = (window_width - 32.0).clamp(280.0, CAPSULE_MAX);
+/// Capsule width at spring position `t` in `row`: collapsed it is 60% of the row from 768px up, 80% below.
+pub fn capsule_width(row: f32, window_width: f32, t: f32) -> f32 {
     let factor = if window_width >= 768.0 { 0.6 } else { 0.8 };
-    let collapsed = full * factor;
-    collapsed + (full - collapsed) * openness.clamp(0.0, 1.0)
+    let collapsed = row * factor;
+    collapsed + (row - collapsed) * t
 }
 
 /// A string the subtitle overlay will draw. Markers such as `......` are not readable.

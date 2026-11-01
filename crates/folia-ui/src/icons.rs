@@ -1,27 +1,55 @@
 // Lucide icons drawn as tinted SVGs and the icon buttons built from them.
 
-use iced::widget::{button, svg, tooltip};
+use std::sync::LazyLock;
+
+use iced::widget::svg;
 use iced::{Color, Element, Length};
 use lucide_static_svg::Icon;
 
 pub fn icon<'a, M: 'a>(icon: Icon, size: f32, color: Color) -> Element<'a, M> {
-    svg(svg::Handle::from_memory(icon.svg_bytes()))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
+    tinted(svg::Handle::from_memory(icon.svg_bytes()), size, color)
 }
 
-/// A borderless icon button with a tooltip; `on_press` of `None` disables it.
-pub fn icon_button<'a, M: Clone + 'a>(
-    lucide: Icon,
-    size: f32,
-    color: Color,
-    label: &str,
-    on_press: Option<M>,
-) -> Element<'a, M> {
-    let button = button(icon(lucide, size, color)).padding(8).style(button::text).on_press_maybe(on_press);
-    tooltip(button, iced::widget::text(label.to_owned()).size(12), tooltip::Position::Top)
-        .style(iced::widget::container::rounded_box)
+/// Lucide glyphs the original draws with changed attributes, such as `fill="currentColor"`.
+#[derive(Debug, Clone, Copy)]
+pub enum Variant {
+    FilledPlay,
+    FilledPause,
+    /// `strokeWidth={2.4}`.
+    BoldChevronLeft,
+    BoldChevronRight,
+}
+
+static FILLED_PLAY: LazyLock<svg::Handle> =
+    LazyLock::new(|| patched(Icon::Play, "fill=\"none\"", "fill=\"currentColor\""));
+static FILLED_PAUSE: LazyLock<svg::Handle> =
+    LazyLock::new(|| patched(Icon::Pause, "fill=\"none\"", "fill=\"currentColor\""));
+static BOLD_CHEVRON_LEFT: LazyLock<svg::Handle> =
+    LazyLock::new(|| patched(Icon::ChevronLeft, "stroke-width=\"2\"", "stroke-width=\"2.4\""));
+static BOLD_CHEVRON_RIGHT: LazyLock<svg::Handle> =
+    LazyLock::new(|| patched(Icon::ChevronRight, "stroke-width=\"2\"", "stroke-width=\"2.4\""));
+
+pub fn variant<'a, M: 'a>(variant: Variant, size: f32, color: Color) -> Element<'a, M> {
+    let handle = match variant {
+        Variant::FilledPlay => &FILLED_PLAY,
+        Variant::FilledPause => &FILLED_PAUSE,
+        Variant::BoldChevronLeft => &BOLD_CHEVRON_LEFT,
+        Variant::BoldChevronRight => &BOLD_CHEVRON_RIGHT,
+    };
+    tinted(LazyLock::force(handle).clone(), size, color)
+}
+
+fn patched(icon: Icon, from: &str, to: &str) -> svg::Handle {
+    svg::Handle::from_memory(icon.svg_str().replacen(from, to, 1).into_bytes())
+}
+
+fn tinted<'a, M: 'a>(handle: svg::Handle, size: f32, color: Color) -> Element<'a, M> {
+    // The SVG tint replaces RGB and keeps the source alpha, so Color.a has to be the widget opacity.
+    let opaque = Color { a: 1.0, ..color };
+    svg(handle)
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .opacity(color.a)
+        .style(move |_, _| svg::Style { color: Some(opaque) })
         .into()
 }

@@ -2,6 +2,16 @@
 name = "Folia"
 
 [options]
+save = "保存"
+playerBottomBarPositioningHint = "拖动控制条设置高度"
+playerBottomBarRepositionUnavailable = "先播放一首歌 —— 控制条要在屏幕上才能拖动"
+playerBottomBarReposition = "在播放页拖动调整"
+playerBottomBarReset = "恢复默认高度"
+playerBottomBarOffsetDesc = "同时调整各页面的底部控制条、歌曲卡片、操作按钮和侧边面板；播放页字幕也会跟随。最高不超过半个屏幕。"
+playerBottomBarOffset = "底部组件高度"
+settingsHeadingControlBar = "控制栏"
+settingsPagePlayer = "播放页"
+playerControlSlotAction_lyricsTimeline = "歌词时间轴"
 appLanguage = "界面语言"
 appLanguageSystem = "跟随系统"
 appLanguageZhCN = "简体中文"
@@ -33,6 +43,14 @@ visualizerFrameRateValue = "限制档位"
 appLanguageSystemHint = "当前生效：{{language}}"
 lyricsAnimationAdjust = "歌词动画样式"
 settingsWindowName = "设置"
+visualizerBackgroundMode = "背景类型"
+visualizerBackgroundModeCommon = "通用"
+transparentPlayerBackground = "播放页透明背景"
+customTheme = "自定义"
+customThemeUnavailable = "尚未创建自定义主题"
+themeQuickEditUnavailable = "默认主题不可编辑"
+randomVisualizerReroll = "从随机池里换一种"
+randomPoolChoose = "选择随机池"
 
 [player]
 play = "播放"
@@ -40,10 +58,13 @@ pause = "暂停"
 loopOff = "关闭循环"
 loopAll = "列表循环"
 loopOne = "单曲循环"
+like = "收藏"
+unlike = "取消收藏"
 unknownArtist = "未知歌手"
 unknownAlbum = "未知专辑"
 
 [ui]
+cancel = "取消"
 searching = "搜索中..."
 previousTrack = "上一首"
 nextTrack = "下一首"
@@ -66,21 +87,117 @@ minimizeWindow = "最小化"
 maximizeWindow = "最大化"
 restoreWindow = "还原窗口"
 close = "关闭"
+backToHome = "返回主页"
+automix = "智能过渡"
+equalizerTitle = "音频效果器"
+playingFrom = "播放自 {{name}}"
+animationIntensity = "动画强度"
+moreSettings = "更多设置"
+animationMode = "歌词样式"
+default = "默认"
+aiTheme = "AI主题"
+generateAITheme = "生成AI主题"
 
 [localMusic]
+resetLyricTimelineOffset = "重置时间轴偏移"
 allSongs = "全部歌曲"
 importFolder = "导入文件夹"
 importing = "导入中..."
 noLocalMusic = "暂无本地音乐"
 reload = "重新加载"
+folder = "本地"
+lyrics = "歌词"
+matchOnline = "在线匹配"
+statusNone = "无"
+statusOnline = "在线"
+statusLocal = "本地"
+addToPlaylist = "添加到歌单"
+replayGainOff = "关闭"
+replayGainTrack = "单曲"
+replayGainAlbum = "专辑"
+replayGainAuto = "智能平衡"
+replayGainUnavailable = "未检测到 ReplayGain"
+replayGainTitle = "音频增益"
+lyricTimelineOffset = "时间轴偏移"
 
 [search]
 placeholder = "搜索歌曲..."
 error = "搜索失败，请重试。"
+retry = "重试"
+sourceLocal = "本地"
+sourceNetease = "网易云"
+
+[libraryBravais]
+homeTitle = "书库"
+seamFold = "折叠"
+seamExpand = "展开"
 
 [libraryBravaisHome]
 search = "搜索"
 searchSubmit = "搜索"
+settings = "设置"
+more = "更多"
+backToPlayer = "回到播放页"
+
+[wallTools]
+queue = "播放队列"
+openPlayer = "前往播放页"
+openPlayerUnavailable = "还没有在播放的歌"
+openSettings = "打开设置"
+shuffle = "打乱播放队列"
+shuffleUnavailable = "队列里至少要有两首（私人 FM 中不可用）"
+theme = "为当前歌曲生成主题"
+themeUnavailable = "需要一首正在播放、带歌词（或纯音乐）的歌"
+mute = "静音"
+unmute = "取消静音"
+muted = "已静音"
 
 [home]
 loading = "加载中..."
+lattice = "队列拼贴"
+noResults = "未找到相关结果"
+
+[panel]
+cover = "封面"
+controls = "控制"
+playlist = "播放列表"
+account = "音质"
+
+[queue]
+remove = "从队列中删除"
+moveToEnd = "移到队尾"
+playNext = "下一首播放"
+empty = "播放列表为空"
+title = "播放队列"
+shuffle = "打乱队列"
+
+[animation]
+calm = "平静"
+normal = "标准"
+chaotic = "混乱"
+
+[theme]
+midnightDefault = "午夜墨染"
+daylightDefault = "日光素白"
+
+[status]
+songUnavailableTag = "已下架"
+songVideoTag = "MV"
+providerLikeUnavailable = "{{provider}} 暂不支持喜欢歌曲。"
+providerPlaylistMutationUnavailable = "{{provider}} 暂不支持将歌曲添加到歌单。"
+
+[account]
+guestMode = "游客模式"
+loginOnHome = "去主页登录"
+audioQuality = "默认音质"
+qualityStandard = "标准"
+qualityExhigh = "极高"
+qualityUltra = "超高"
+qualityLossless = "无损"
+qualityHires = "Hi-Res"
+
+[lyricFile]
+button = "导入 / 导出歌词"
+
+[lyricProvider]
+netease = "网易云音乐"

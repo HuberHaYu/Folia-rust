@@ -1,10 +1,12 @@
 // Lyric animation styles drawn on an iced canvas; every frame is a pure function of playback time.
 
 mod anim;
+mod preview;
 mod registry;
 pub mod styles;
 
 pub use anim::{Ease, keyframes, spring, tween};
+pub use preview::{POSTER_TIME, PREVIEW_LOOP, STAGE_HEIGHT, STAGE_WIDTH, preview_lyrics};
 pub use registry::Style;
 
 use std::cell::RefCell;
@@ -25,6 +27,8 @@ pub struct Scene<'a> {
     pub time: f64,
     pub theme: &'a Theme,
     pub font_scale: f32,
+    /// Draws as on a stage this large, scaled down to cover the widget; `None` draws at the widget size.
+    pub stage: Option<Size>,
 }
 
 /// Per-widget state: measured line layouts survive between frames.
@@ -49,11 +53,25 @@ impl<Message> canvas::Program<Message> for Scene<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let size = bounds.size();
+        let target = bounds.size();
+        // A picture lays out on its stage and is scaled down to cover the widget.
+        let (size, scale) = match self.stage {
+            Some(stage) if stage.width > 0.0 && stage.height > 0.0 => {
+                (stage, (target.width / stage.width).max(target.height / stage.height))
+            }
+            _ => (target, 1.0),
+        };
         match self.style {
             Style::Classic | Style::Partita | Style::Tilt | Style::Claddagh | Style::Cadenza => {
-                let mut frame = Frame::new(renderer, size);
-                frame.fill_rectangle(iced::Point::ORIGIN, size, color(self.theme.background, 1.0));
+                let mut frame = Frame::new(renderer, target);
+                frame.fill_rectangle(iced::Point::ORIGIN, target, color(self.theme.background, 1.0));
+                if scale != 1.0 {
+                    frame.translate(iced::Vector::new(
+                        (target.width - size.width * scale) / 2.0,
+                        (target.height - size.height * scale) / 2.0,
+                    ));
+                    frame.scale(scale);
+                }
                 match self.style {
                     Style::Partita => styles::partita::draw(self, &mut state.partita.borrow_mut(), &mut frame, size),
                     Style::Tilt => styles::tilt::draw(self, &mut state.tilt.borrow_mut(), &mut frame, size),
@@ -63,7 +81,7 @@ impl<Message> canvas::Program<Message> for Scene<'_> {
                 }
                 vec![frame.into_geometry()]
             }
-            Style::Still => vec![styles::still::draw(self, &state.still, renderer, size)],
+            Style::Still => vec![styles::still::draw(self, &state.still, renderer, target, size)],
         }
     }
 }
@@ -127,4 +145,27 @@ pub fn measure(content: &str, size: f32, font: Font, max_width: f32) -> Size {
         wrapping: core_text::Wrapping::Word,
     });
     paragraph.min_bounds()
+}
+
+/// `content` cut with an ellipsis so it wraps to at most `lines` lines of `width`, like `-webkit-line-clamp`.
+pub fn clamp_lines(content: &str, size: f32, font: Font, width: f32, lines: usize) -> String {
+    let fits = |text: &str| {
+        let bounds = measure(text, size, font, width);
+        bounds.width <= width + 0.5 && (bounds.height / (size * 1.22)).round() as usize <= lines
+    };
+    if fits(content) {
+        return content.to_owned();
+    }
+    let ends: Vec<usize> = content.char_indices().map(|(at, _)| at).collect();
+    let cut = |count: usize| format!("{}\u{2026}", content[..ends[count]].trim_end());
+    let (mut fitting, mut overflowing) = (0, ends.len());
+    while overflowing - fitting > 1 {
+        let middle = (fitting + overflowing) / 2;
+        if fits(&cut(middle)) {
+            fitting = middle;
+        } else {
+            overflowing = middle;
+        }
+    }
+    cut(fitting)
 }

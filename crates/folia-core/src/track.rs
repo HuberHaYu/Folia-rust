@@ -36,6 +36,9 @@ pub struct Track {
     pub duration: f64,
     #[serde(default)]
     pub online: Option<OnlineId>,
+    /// Cover image address from an online search, when the platform sent one.
+    #[serde(default)]
+    pub cover_url: Option<String>,
 }
 
 impl Track {

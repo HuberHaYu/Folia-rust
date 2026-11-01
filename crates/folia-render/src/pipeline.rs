@@ -1,11 +1,23 @@
-// One full-screen triangle drawn by a WGSL fragment shader reading a single uniform buffer.
+// One full-screen triangle drawn by a WGSL fragment shader, with a uniform buffer per primitive in the frame.
 
-/// Pipeline, bind group and uniform buffer shared by every full-screen pass.
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Pipeline and uniform buffers shared by every full-screen pass of one kind.
+///
+/// iced prepares every primitive of a frame before drawing any, so each primitive writes its own
+/// buffer. Buffers are kept across frames and only grow with the most primitives seen in one frame.
 pub struct Fullscreen {
     pub pipeline: wgpu::RenderPipeline,
-    pub bind: wgpu::BindGroup,
-    pub uniform: wgpu::Buffer,
+    layout: wgpu::BindGroupLayout,
+    label: String,
+    uniform_size: u64,
+    slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
+    used: usize,
 }
+
+/// The uniform buffer a primitive was prepared into, read back when it draws.
+#[derive(Debug, Default)]
+pub struct Slot(AtomicUsize);
 
 impl Fullscreen {
     /// `source` must define `vs`, `fragment` and a uniform at group 0, binding 0 of `uniform_size` bytes.
@@ -21,12 +33,6 @@ impl Fullscreen {
             label: Some(label),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: uniform_size as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(label),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -39,11 +45,6 @@ impl Fullscreen {
                 },
                 count: None,
             }],
-        });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
@@ -75,12 +76,48 @@ impl Fullscreen {
             multiview: None,
             cache: None,
         });
-        Self { pipeline, bind, uniform }
+        Self {
+            pipeline,
+            layout,
+            label: label.to_owned(),
+            uniform_size: uniform_size as u64,
+            slots: Vec::new(),
+            used: 0,
+        }
     }
 
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+    /// Uploads one primitive's uniforms into the next free buffer and records it in `slot`.
+    pub fn write(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, slot: &Slot, bytes: &[u8]) {
+        if self.used == self.slots.len() {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&self.label),
+                size: self.uniform_size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&self.label),
+                layout: &self.layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+            });
+            self.slots.push((buffer, bind));
+        }
+        if let Some((buffer, _)) = self.slots.get(self.used) {
+            queue.write_buffer(buffer, 0, bytes);
+        }
+        slot.0.store(self.used, Ordering::Relaxed);
+        self.used += 1;
+    }
+
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, slot: &Slot) {
+        let Some((_, bind)) = self.slots.get(slot.0.load(Ordering::Relaxed)) else { return };
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_bind_group(0, bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// Frees every buffer for the next frame's primitives.
+    pub fn trim(&mut self) {
+        self.used = 0;
     }
 }

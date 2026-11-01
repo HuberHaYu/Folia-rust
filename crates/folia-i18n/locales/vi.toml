@@ -2,6 +2,16 @@
 name = "Folia"
 
 [options]
+save = "Lưu"
+playerBottomBarPositioningHint = "Kéo thanh để chỉnh chiều cao"
+playerBottomBarRepositionUnavailable = "Cần phát nhạc trước — thanh điều khiển phải hiển thị mới có thể di chuyển"
+playerBottomBarReposition = "Chỉnh vị trí trên trang phát"
+playerBottomBarReset = "Đặt lại chiều cao"
+playerBottomBarOffsetDesc = "Điều chỉnh thanh điều khiển dưới, thẻ bài hát, nút tác vụ và bảng bên trên mọi trang; phụ đề trình phát cũng di chuyển theo. Tối đa nửa màn hình."
+playerBottomBarOffset = "Chiều cao điều khiển dưới"
+settingsHeadingControlBar = "Thanh điều khiển"
+settingsPagePlayer = "Trang phát nhạc"
+playerControlSlotAction_lyricsTimeline = "Dòng thời gian lời bài hát"
 appLanguage = "Ngôn ngữ giao diện"
 appLanguageSystem = "Theo hệ thống"
 appLanguageZhCN = "Tiếng Trung giản thể"
@@ -33,6 +43,14 @@ visualizerFrameRateValue = "Giới hạn"
 appLanguageSystemHint = "Theo ngôn ngữ trình duyệt hoặc hệ thống. Hiện tại: {{language}}"
 lyricsAnimationAdjust = "Chỉnh hiệu ứng lời"
 settingsWindowName = "Cài đặt"
+visualizerBackgroundMode = "Loại nền"
+visualizerBackgroundModeCommon = "Common"
+transparentPlayerBackground = "Nền trình phát trong suốt"
+customTheme = "Tùy chỉnh"
+customThemeUnavailable = "Chưa có chủ đề tùy chỉnh"
+themeQuickEditUnavailable = "Chủ đề mặc định không thể chỉnh sửa"
+randomVisualizerReroll = "Đổi ngẫu nhiên phong cách khác"
+randomPoolChoose = "Chọn kho ngẫu nhiên"
 
 [player]
 play = "Phát"
@@ -40,10 +58,13 @@ pause = "Tạm dừng"
 loopOff = "Tắt lặp"
 loopAll = "Lặp danh sách"
 loopOne = "Lặp một bài"
+like = "Thích"
+unlike = "Bỏ thích"
 unknownArtist = "Nghệ sĩ không rõ"
 unknownAlbum = "Album không rõ"
 
 [ui]
+cancel = "Hủy"
 searching = "Đang tìm kiếm..."
 previousTrack = "Bài trước"
 nextTrack = "Bài tiếp theo"
@@ -66,21 +87,117 @@ minimizeWindow = "Thu nhỏ"
 maximizeWindow = "Phóng to"
 restoreWindow = "Khôi phục"
 close = "Đóng"
+backToHome = "Về trang chủ"
+automix = "Chuyển tiếp thông minh"
+equalizerTitle = "Hiệu ứng âm thanh"
+playingFrom = "Đang phát từ {{name}}"
+animationIntensity = "Cường độ hiệu ứng"
+moreSettings = "Cài đặt khác"
+animationMode = "Kiểu lời bài hát"
+default = "Mặc định"
+aiTheme = "Chủ đề AI"
+generateAITheme = "Tạo chủ đề AI"
 
 [localMusic]
+resetLyricTimelineOffset = "Đặt lại độ lệch mốc thời gian"
 allSongs = "Tất cả bài hát"
 importFolder = "Nhập thư mục"
 importing = "Đang nhập..."
 noLocalMusic = "Chưa nhập nhạc nội bộ"
 reload = "Tải lại"
+folder = "Thư mục"
+lyrics = "Lời bài hát"
+matchOnline = "Khớp trực tuyến"
+statusNone = "Không có"
+statusOnline = "Trực tuyến"
+statusLocal = "Nội bộ"
+addToPlaylist = "Thêm vào danh sách phát"
+replayGainOff = "Tắt"
+replayGainTrack = "Bài hát"
+replayGainAlbum = "Album"
+replayGainAuto = "Thông minh"
+replayGainUnavailable = "Không tìm thấy Cân bằng âm lượng"
+replayGainTitle = "Cân bằng âm lượng"
+lyricTimelineOffset = "Lệch mốc thời gian"
 
 [search]
 placeholder = "Tìm bài hát..."
 error = "Tìm kiếm thất bại. Thử lại sau."
+retry = "Thử lại"
+sourceLocal = "Nội bộ"
+sourceNetease = "NetEase"
+
+[libraryBravais]
+homeTitle = "Thư viện"
+seamFold = "Gập"
+seamExpand = "Mở rộng"
 
 [libraryBravaisHome]
 search = "Tìm kiếm"
 searchSubmit = "Tìm kiếm"
+settings = "Cài đặt"
+more = "Thêm"
+backToPlayer = "Về trình phát"
+
+[wallTools]
+queue = "Hàng đợi phát"
+openPlayer = "Mở trình phát"
+openPlayerUnavailable = "Chưa có bài nào đang phát"
+openSettings = "Mở cài đặt"
+shuffle = "Xáo trộn hàng đợi phát"
+shuffleUnavailable = "Cần từ hai bài trở lên trong hàng đợi (không khả dụng trong FM cá nhân)"
+theme = "Tạo chủ đề cho bài hát này"
+themeUnavailable = "Cần một bài hát đang phát có lời (hoặc nhạc không lời)"
+mute = "Tắt tiếng"
+unmute = "Bật tiếng"
+muted = "Đã tắt tiếng"
 
 [home]
 loading = "Đang tải..."
+lattice = "Lattice"
+noResults = "Không tìm thấy kết quả."
+
+[panel]
+cover = "Ảnh bìa"
+controls = "Điều khiển"
+playlist = "Danh sách phát"
+account = "Tài khoản"
+
+[queue]
+remove = "Xóa khỏi hàng đợi"
+moveToEnd = "Chuyển xuống cuối"
+playNext = "Phát tiếp theo"
+empty = "Hàng đợi trống"
+title = "Hàng đợi phát"
+shuffle = "Xáo trộn hàng đợi"
+
+[animation]
+calm = "Êm dịu"
+normal = "Tiêu chuẩn"
+chaotic = "Hỗn loạn"
+
+[theme]
+midnightDefault = "Mặc định nửa đêm"
+daylightDefault = "Mặc định ban ngày"
+
+[status]
+songUnavailableTag = "Không khả dụng"
+songVideoTag = "MV"
+providerLikeUnavailable = "{{provider}} không hỗ trợ thích bài hát."
+providerPlaylistMutationUnavailable = "{{provider}} không hỗ trợ thêm bài hát vào danh sách phát."
+
+[account]
+guestMode = "Chế độ khách"
+loginOnHome = "Đăng nhập tại Trang chủ"
+audioQuality = "Chất lượng mặc định"
+qualityStandard = "Tiêu chuẩn"
+qualityExhigh = "Rất cao"
+qualityUltra = "Siêu cao"
+qualityLossless = "Lossless"
+qualityHires = "Hi-Res"
+
+[lyricFile]
+button = "Nhập / xuất lời bài hát"
+
+[lyricProvider]
+netease = "NetEase Cloud Music"

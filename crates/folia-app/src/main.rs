@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use folia_i18n::I18n;
-use folia_store::{AppDirs, AppearanceSettings, GeneralSettings, PlaybackSettings, Store};
+use folia_store::{AppDirs, AppearanceSettings, GeneralSettings, PlaybackSettings, PlayerSettings, Store};
 use folia_ui::{Init, Shell};
 use tracing_subscriber::EnvFilter;
 
@@ -50,6 +50,7 @@ fn main() -> anyhow::Result<()> {
     let init = Init {
         appearance: store.load_or_default::<AppearanceSettings>(),
         playback: store.load_or_default::<PlaybackSettings>(),
+        player: store.load_or_default::<PlayerSettings>(),
         library_db: dirs.data.join("library.db"),
         cache_dir: dirs.cache.clone(),
         open_files: std::env::args_os().skip(1).map(std::path::PathBuf::from).collect(),

@@ -3,7 +3,7 @@
 use iced::widget::shader::{self, Primitive as ShaderPrimitive};
 use iced::{Rectangle, mouse};
 
-use crate::pipeline::Fullscreen;
+use crate::pipeline::{Fullscreen, Slot};
 
 const SHADER: &str = concat!(include_str!("../shaders/fullscreen.wgsl"), include_str!("../shaders/wash.wgsl"));
 
@@ -41,7 +41,7 @@ impl<Message> shader::Program<Message> for Wash {
         uniforms.base = [r, g, b, 1.0];
         uniforms.glows =
             self.glows.map(|glow| GlowUniform { center: glow.center, reach: glow.reach, _pad: 0.0, color: glow.rgba });
-        WashPass(uniforms)
+        WashPass(uniforms, Slot::default())
     }
 }
 
@@ -53,7 +53,7 @@ impl<Message> shader::Program<Message> for Veil {
         let mut uniforms = Uniforms::sized(bounds);
         uniforms.vignette = self.vignette;
         uniforms.grain = self.grain;
-        VeilPass(uniforms)
+        VeilPass(uniforms, Slot::default())
     }
 }
 
@@ -85,10 +85,10 @@ impl Uniforms {
 }
 
 #[derive(Debug)]
-pub struct WashPass(Uniforms);
+pub struct WashPass(Uniforms, Slot);
 
 #[derive(Debug)]
-pub struct VeilPass(Uniforms);
+pub struct VeilPass(Uniforms, Slot);
 
 /// A full-screen pass and whether its target stores sRGB, so the shader must hand back linear color.
 pub struct Gpu {
@@ -102,9 +102,9 @@ impl Gpu {
         Self { fullscreen, srgb_target: format.is_srgb() }
     }
 
-    fn write(&self, queue: &wgpu::Queue, uniforms: Uniforms) {
+    fn write(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, slot: &Slot, uniforms: Uniforms) {
         let uniforms = Uniforms { encode: if self.srgb_target { 1.0 } else { 0.0 }, ..uniforms };
-        queue.write_buffer(&self.fullscreen.uniform, 0, bytemuck::bytes_of(&uniforms));
+        self.fullscreen.write(device, queue, slot, bytemuck::bytes_of(&uniforms));
     }
 }
 
@@ -116,11 +116,19 @@ impl shader::Pipeline for WashGpu {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self(Gpu::new(device, format, "fs_wash"))
     }
+
+    fn trim(&mut self) {
+        self.0.fullscreen.trim();
+    }
 }
 
 impl shader::Pipeline for VeilGpu {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self(Gpu::new(device, format, "fs_veil"))
+    }
+
+    fn trim(&mut self) {
+        self.0.fullscreen.trim();
     }
 }
 
@@ -130,16 +138,16 @@ impl ShaderPrimitive for WashPass {
     fn prepare(
         &self,
         pipeline: &mut WashGpu,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        pipeline.0.write(queue, self.0);
+        pipeline.0.write(device, queue, &self.1, self.0);
     }
 
     fn draw(&self, pipeline: &WashGpu, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        pipeline.0.fullscreen.draw(pass);
+        pipeline.0.fullscreen.draw(pass, &self.1);
         true
     }
 }
@@ -150,16 +158,16 @@ impl ShaderPrimitive for VeilPass {
     fn prepare(
         &self,
         pipeline: &mut VeilGpu,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        pipeline.0.write(queue, self.0);
+        pipeline.0.write(device, queue, &self.1, self.0);
     }
 
     fn draw(&self, pipeline: &VeilGpu, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        pipeline.0.fullscreen.draw(pass);
+        pipeline.0.fullscreen.draw(pass, &self.1);
         true
     }
 }

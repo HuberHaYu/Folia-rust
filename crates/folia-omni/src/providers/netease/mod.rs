@@ -34,7 +34,7 @@ struct Song {
     name: String,
     #[serde(default)]
     ar: Vec<Named>,
-    al: Option<Named>,
+    al: Option<Album>,
     #[serde(default)]
     dt: u64,
 }
@@ -42,6 +42,13 @@ struct Song {
 #[derive(Deserialize)]
 struct Named {
     name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Album {
+    name: Option<String>,
+    #[serde(rename = "picUrl")]
+    pic_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,15 +166,21 @@ fn lyrics(response: LyricResponse) -> Option<Lyrics> {
 fn track(song: Song) -> Track {
     let online = OnlineId { provider: ID.to_owned(), id: song.id.to_string() };
     let artists: Vec<String> = song.ar.into_iter().filter_map(|artist| artist.name).collect();
+    let album = song.al;
     Track {
         id: online.track_id(),
         title: song.name,
         artist: (!artists.is_empty()).then(|| artists.join(" / ")),
-        album: song.al.and_then(|album| album.name),
+        album: album.as_ref().and_then(|album| album.name.clone()),
+        cover_url: album.and_then(|album| album.pic_url).map(https),
         duration: song.dt as f64 / 1000.0,
         online: Some(online),
         ..Track::default()
     }
+}
+
+fn https(url: String) -> String {
+    url.strip_prefix("http://").map(|rest| format!("https://{rest}")).unwrap_or(url)
 }
 
 fn check(code: i64) -> Result<(), OmniError> {

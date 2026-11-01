@@ -1,10 +1,10 @@
 // Home cover wall: the original Bravais wall of album tiles, ranked outward from the centre and panned by dragging.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use folia_core::{Rgb, Theme, Track};
-use folia_library::Cover;
+use folia_library::{Cover, CoverCache};
 use iced::advanced::image::Handle;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text, gradient};
 use iced::{Color, Font, Point, Rectangle, Renderer, Size, Task, Vector, mouse, window};
@@ -20,7 +20,9 @@ const SLOTS_PER_BLOCK: usize = 12;
 const RANK_VERTICAL_WEIGHT: f32 = 0.9;
 const RANK_AREA_WEIGHT: f32 = 0.35;
 const DRAG_THRESHOLD: f32 = 4.0;
-const MAX_COVERS: usize = 120;
+/// Pixel budget of the decoded tile covers: three 1920×1080 screens of tiles at the 0.76 wall scale
+/// (about 14 MB of RGBA each), so panning back and forth does not decode again.
+const COVER_BYTES: usize = 48 * 1024 * 1024;
 const TITLE_LINES: usize = 3;
 const BADGE_FONT: Font = Font { weight: iced::font::Weight::ExtraBold, ..Font::DEFAULT };
 const TITLE_FONT: Font = Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT };
@@ -134,26 +136,43 @@ pub enum Message {
     CoversLoaded(Vec<(i64, Option<Cover>)>),
 }
 
-#[derive(Default)]
 pub struct Wall {
     placements: Vec<Placement>,
     labels: HashMap<usize, Label>,
     typeset: Option<Typeset>,
     viewport: Size,
     pan: Vector,
-    covers: HashMap<i64, Option<Handle>>,
-    order: VecDeque<i64>,
+    covers: CoverCache<i64, Handle>,
     pending: HashSet<i64>,
+    seam_open: f32,
 }
 
 impl Wall {
+    pub fn new() -> Self {
+        Self {
+            placements: Vec::new(),
+            labels: HashMap::new(),
+            typeset: None,
+            viewport: Size::ZERO,
+            pan: Vector::ZERO,
+            covers: CoverCache::new(COVER_BYTES),
+            pending: HashSet::new(),
+            seam_open: 0.0,
+        }
+    }
+
+    /// Pans so the tile at `index` sits in the middle of the wall.
+    pub fn center_on(&mut self, index: usize) {
+        let Some(place) = self.placements.iter().find(|place| place.track == index) else { return };
+        self.pan = Vector::new(place.rect.x + place.rect.width / 2.0, place.rect.y + place.rect.height / 2.0);
+    }
+
     /// Lays out `tracks` around the wall's origin and fetches what lands on screen.
     pub fn relayout(&mut self, tracks: &[Track]) -> Task<Message> {
         self.placements = place(tracks.len());
         self.pan = Vector::ZERO;
         self.labels.clear();
         self.covers.clear();
-        self.order.clear();
         self.show_visible(tracks)
     }
 
@@ -169,22 +188,24 @@ impl Wall {
                 (self.show_visible(tracks), None)
             }
             Message::Pan(delta) => {
-                self.pan += delta;
+                self.pan_by(delta);
                 self.fit_visible(tracks);
                 (Task::none(), None)
             }
-            Message::Settled => (self.show_visible(tracks), None),
+            Message::Settled => {
+                // `clampToCameraRange`: a released wall settles back inside its range.
+                let (min, max) = self.range_x();
+                self.pan.x = self.pan.x.clamp(min, max);
+                (self.show_visible(tracks), None)
+            }
             Message::Play(index) => (Task::none(), Some(index)),
             Message::CoversLoaded(covers) => {
                 for (id, cover) in covers {
                     self.pending.remove(&id);
-                    let handle = cover.map(|c| Handle::from_rgba(c.width, c.height, c.rgba));
-                    if handle.is_some() {
-                        self.order.push_back(id);
-                    }
-                    self.covers.insert(id, handle);
+                    let bytes = cover.as_ref().map_or(0, |cover| cover.rgba.len());
+                    let handle = cover.map(|cover| Handle::from_rgba(cover.width, cover.height, cover.rgba));
+                    self.covers.insert(id, handle, bytes);
                 }
-                self.evict();
                 (Task::none(), None)
             }
         }
@@ -205,8 +226,8 @@ impl Wall {
             let width = placement.rect.width * typeset.scale - 34.0 * typeset.scale;
             let artist = track.artist.as_deref().unwrap_or_default();
             let label = Label {
-                title: clamp_lines(&track.title, typeset.title, TITLE_FONT, width, TITLE_LINES),
-                artist: clamp_lines(artist, typeset.artist, ARTIST_FONT, width, 1),
+                title: folia_visualizer::clamp_lines(&track.title, typeset.title, TITLE_FONT, width, TITLE_LINES),
+                artist: folia_visualizer::clamp_lines(artist, typeset.artist, ARTIST_FONT, width, 1),
             };
             self.labels.insert(placement.track, label);
         }
@@ -214,10 +235,17 @@ impl Wall {
 
     /// Decodes covers for the tiles on screen that have none yet, on a worker thread, cropped to each tile.
     fn load_visible(&mut self, tracks: &[Track]) -> Task<Message> {
+        // Tiles on screen are the ones the budget keeps longest; covers decode at the size they are drawn.
+        let shown: Vec<i64> =
+            self.visible().filter_map(|placement| tracks.get(placement.track)).map(|track| track.id).collect();
+        for id in &shown {
+            self.covers.touch(id);
+        }
+        let scale = wall_scale(self.viewport.width);
         let wanted: Vec<(i64, PathBuf, Size)> = self
             .visible()
-            .filter_map(|placement| Some((tracks.get(placement.track)?, placement.rect.size())))
-            .filter(|(track, _)| !self.covers.contains_key(&track.id) && !self.pending.contains(&track.id))
+            .filter_map(|placement| Some((tracks.get(placement.track)?, placement.rect.size() * scale)))
+            .filter(|(track, _)| self.covers.peek(&track.id).is_none() && !self.pending.contains(&track.id))
             .map(|(track, size)| (track.id, track.path.clone(), size))
             .collect();
         if wanted.is_empty() {
@@ -232,21 +260,46 @@ impl Wall {
         Task::perform(work, |covers| Message::CoversLoaded(covers.unwrap_or_default()))
     }
 
-    fn evict(&mut self) {
-        while self.order.len() > MAX_COVERS {
-            if let Some(old) = self.order.pop_front() {
-                self.covers.remove(&old);
-            }
-        }
+    fn visible(&self) -> impl Iterator<Item = &Placement> {
+        let screen = Rectangle::new(Point::ORIGIN, self.viewport);
+        self.placements.iter().filter(move |placement| self.screen(placement.rect).intersects(&screen))
     }
 
-    fn visible(&self) -> impl Iterator<Item = &Placement> {
-        let (viewport, pan) = (self.viewport, self.pan);
-        let scale = wall_scale(viewport.width);
-        let screen = Rectangle::new(Point::ORIGIN, viewport);
-        self.placements
-            .iter()
-            .filter(move |placement| to_screen(placement.rect, pan, viewport, scale).intersects(&screen))
+    /// A world rectangle on screen: scaled about the camera, and pushed aside by the open seam.
+    fn screen(&self, rect: Rectangle) -> Rectangle {
+        let scale = wall_scale(self.viewport.width);
+        let push = seam_push(self.seam().width, scale);
+        let mut on_screen = to_screen(rect, self.pan, self.viewport, scale);
+        on_screen.x += if rect.center_x() < SEAM_ANCHOR { -push } else { push };
+        on_screen
+    }
+
+    /// The seam on screen for the opening the home chrome asks for.
+    pub fn seam(&self) -> Seam {
+        self.seam_in(self.viewport.width)
+    }
+
+    pub fn seam_in(&self, width: f32) -> Seam {
+        seam_geometry(self.pan.x, self.seam_open, width)
+    }
+
+    /// The width the seam opens to: the narrow seam or the spine, while it animates.
+    pub fn set_seam(&mut self, width: f32) {
+        self.seam_open = width;
+    }
+
+    fn range_x(&self) -> (f32, f32) {
+        let left = self.placements.iter().map(|place| place.rect.x).fold(SEAM_ANCHOR, f32::min);
+        let right = self.placements.iter().map(|place| place.rect.x + place.rect.width).fold(SEAM_ANCHOR, f32::max);
+        camera_range_x(left, right, self.seam_open, self.viewport.width)
+    }
+
+    /// `stepCameraAxis` on x: full speed inside the range, a third of it beyond (rubber band).
+    fn pan_by(&mut self, delta: Vector) {
+        let (min, max) = self.range_x();
+        let next = self.pan.x + delta.x;
+        self.pan.x = if next < min || next > max { self.pan.x + delta.x * 0.35 } else { next };
+        self.pan.y += delta.y;
     }
 
     pub fn view<'a>(
@@ -307,8 +360,8 @@ impl canvas::Program<Message> for WallProgram<'_> {
                 if std::mem::take(&mut state.dragging) {
                     return Some(Action::publish(Message::Settled));
                 }
-                let pan = self.wall.pan;
-                let hit = self.wall.visible().find(|p| to_screen(p.rect, pan, bounds.size(), scale).contains(from))?;
+
+                let hit = self.wall.visible().find(|p| self.wall.screen(p.rect).contains(from))?;
                 (hit.track < self.tracks.len()).then(|| Action::publish(Message::Play(hit.track)))
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -337,9 +390,9 @@ impl canvas::Program<Message> for WallProgram<'_> {
         for placement in self.wall.visible() {
             let Some(track) = self.tracks.get(placement.track) else { continue };
             let tile = Tile {
-                rect: to_screen(placement.rect, self.wall.pan, self.wall.viewport, typeset.scale),
+                rect: self.wall.screen(placement.rect),
                 index: placement.track,
-                cover: self.wall.covers.get(&track.id).and_then(Option::as_ref),
+                cover: self.wall.covers.peek(&track.id).and_then(Option::as_ref),
                 label: self.wall.labels.get(&placement.track),
                 current: self.playing == Some(track.id),
             };
@@ -456,29 +509,6 @@ fn draw_copy(frame: &mut Frame, rect: Rectangle, label: &Label, typeset: &Typese
     });
 }
 
-/// `content` cut with an ellipsis so it wraps to at most `lines` lines of `width`, like `-webkit-line-clamp`.
-fn clamp_lines(content: &str, size: f32, font: Font, width: f32, lines: usize) -> String {
-    let fits = |text: &str| {
-        let bounds = folia_visualizer::measure(text, size, font, width);
-        bounds.width <= width + 0.5 && (bounds.height / (size * 1.22)).round() as usize <= lines
-    };
-    if fits(content) {
-        return content.to_owned();
-    }
-    let ends: Vec<usize> = content.char_indices().map(|(at, _)| at).collect();
-    let cut = |count: usize| format!("{}\u{2026}", content[..ends[count]].trim_end());
-    let (mut fitting, mut overflowing) = (0, ends.len());
-    while overflowing - fitting > 1 {
-        let middle = (fitting + overflowing) / 2;
-        if fits(&cut(middle)) {
-            fitting = middle;
-        } else {
-            overflowing = middle;
-        }
-    }
-    cut(fitting)
-}
-
 /// The original `getBravaisScale`: the whole wall is drawn smaller on narrow windows.
 fn wall_scale(viewport_width: f32) -> f32 {
     if viewport_width < 640.0 {
@@ -551,4 +581,45 @@ fn mix(column: i32, row: i32) -> u32 {
     value = ((value ^ (value >> 15)) as i32).wrapping_mul(0x2c1b_3c6d) as u32;
     value ^= value >> 12;
     value
+}
+
+/// The seam opens on the boundary between block columns -1 and 0, the middle of the first gap.
+pub const SEAM_ANCHOR: f32 = -GAP / 2.0;
+/// `SEAM_EDGE_MARGIN`: the seam starts closing this far from the window edge.
+const SEAM_EDGE: f32 = 14.0;
+
+/// Where the seam is on screen: its centre and how wide it is open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Seam {
+    pub center: f32,
+    pub width: f32,
+}
+
+/// `getSeamGeometry`: the anchor follows the camera; near an edge the opening narrows to what still fits.
+pub fn seam_geometry(pan_x: f32, open_width: f32, viewport_width: f32) -> Seam {
+    let scale = wall_scale(viewport_width);
+    let center = viewport_width / 2.0 + (SEAM_ANCHOR - pan_x) * scale;
+    let room = center.min(viewport_width - center) - SEAM_EDGE;
+    Seam { center, width: open_width.min(room * 2.0).max(0.0) }
+}
+
+/// `getSeamSplitOffsets`: how far the halves of the wall move apart, on screen, for an opening this wide.
+fn seam_push(width: f32, scale: f32) -> f32 {
+    width / 2.0 + GAP / 2.0 * scale * (width / 16.0).min(1.0)
+}
+
+/// `getWallCameraRange` and `getSeamCameraSpan` on x: the camera may show all the tiles and keep the seam open.
+pub fn camera_range_x(left: f32, right: f32, open_width: f32, viewport_width: f32) -> (f32, f32) {
+    let scale = wall_scale(viewport_width);
+    let line = viewport_width / 2.0;
+    let side = (line - open_width / 2.0) / scale;
+    let (mut min, mut max) = (left + side, right - side);
+    if min > max {
+        (min, max) = (SEAM_ANCHOR, SEAM_ANCHOR);
+    }
+    let need = open_width / 2.0 + SEAM_EDGE;
+    let span_min = SEAM_ANCHOR - (viewport_width - need - line) / scale;
+    let span_max = SEAM_ANCHOR + (line - need) / scale;
+    let (span_min, span_max) = if span_min <= span_max { (span_min, span_max) } else { (SEAM_ANCHOR, SEAM_ANCHOR) };
+    (min.min(span_min), max.max(span_max))
 }

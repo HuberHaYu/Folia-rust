@@ -3,6 +3,7 @@
 mod providers;
 
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -113,6 +114,24 @@ impl Omni {
         Ok(path)
     }
 
+    /// Downloads a cover once into `covers/` and returns the cached file. `http://` is read as `https://`.
+    pub async fn fetch_cover(&self, url: &str) -> Result<PathBuf, OmniError> {
+        let url = https(url);
+        let dir = self.cache_dir.join("covers");
+        let path = dir.join(cover_cache_key(&url));
+        if path.is_file() {
+            return Ok(path);
+        }
+        let io_err = |source| OmniError::Io { path: path.clone(), source };
+        std::fs::create_dir_all(&dir).map_err(io_err)?;
+        let bytes = self.http.get(&url).send().await?.error_for_status()?.bytes().await?;
+        let partial = path.with_extension("part");
+        std::fs::write(&partial, &bytes).map_err(io_err)?;
+        std::fs::rename(&partial, &path).map_err(io_err)?;
+        tracing::info!(bytes = bytes.len(), "cover cached");
+        Ok(path)
+    }
+
     fn provider(&self, id: &str) -> Result<&dyn Provider, OmniError> {
         self.providers
             .iter()
@@ -120,6 +139,17 @@ impl Omni {
             .map(|provider| provider.as_ref())
             .ok_or_else(|| OmniError::UnknownProvider(id.to_owned()))
     }
+}
+
+/// Stable file name for a cover address, after `http://` is rewritten to `https://`.
+pub fn cover_cache_key(url: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    https(url).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn https(url: &str) -> String {
+    url.strip_prefix("http://").map(|rest| format!("https://{rest}")).unwrap_or_else(|| url.to_owned())
 }
 
 /// A finished download of `stem` in any format.

@@ -1,4 +1,4 @@
-// Home page: the cover wall of every library track, with import and rescan floating over it.
+// Home page: the cover wall. Import and rescan live in the seam menu.
 
 use std::path::PathBuf;
 
@@ -6,18 +6,16 @@ use folia_core::{Theme, Track};
 use folia_i18n::I18n;
 use folia_library::Library;
 use folia_render::{Glow, Veil, Wash};
-use iced::widget::{canvas, container, row, shader, stack, text};
-use iced::{Alignment, Color, Element, Length, Task};
-use lucide_static_svg::Icon;
+use iced::widget::{canvas, container, shader, stack, text};
+use iced::{Color, Element, Length, Task};
 
 use crate::background::{blocking, error_chain};
-use crate::icons::icon_button;
 use crate::wall::{self, Wall};
 
 pub struct LibraryPage {
     db_path: PathBuf,
     pub tracks: Vec<Track>,
-    busy: bool,
+    pub busy: bool,
     error: Option<String>,
     wall: Wall,
 }
@@ -35,8 +33,23 @@ impl LibraryPage {
     /// Shows what the index already holds; scanning only happens on import or reload.
     pub fn new(db_path: PathBuf) -> (Self, Task<Message>) {
         let task = load(db_path.clone(), None, false);
-        let page = Self { db_path, tracks: Vec::new(), busy: true, error: None, wall: Wall::default() };
+        let page = Self { db_path, tracks: Vec::new(), busy: true, error: None, wall: Wall::new() };
         (page, task)
+    }
+
+    /// The seam the wall opens for the home chrome, and where it is on screen.
+    pub fn set_seam(&mut self, width: f32) {
+        self.wall.set_seam(width);
+    }
+
+    /// The seam in a window `width` wide; the wall canvas may not have measured itself yet (an empty library).
+    pub fn seam(&self, width: f32) -> crate::wall::Seam {
+        self.wall.seam_in(width)
+    }
+
+    /// Moves the wall so the track at `index` is in the middle.
+    pub fn reveal(&mut self, index: usize) {
+        self.wall.center_on(index);
     }
 
     /// Handles a page message; returns the index of a track to play when one was chosen.
@@ -82,30 +95,10 @@ impl LibraryPage {
         i18n: &'a I18n,
         theme: &'a Theme,
         daylight: bool,
-        text_color: Color,
+        _text_color: Color,
         muted: Color,
         playing: Option<i64>,
     ) -> Element<'a, Message> {
-        let tools = row![
-            icon_button(
-                Icon::RefreshCw,
-                18.0,
-                text_color,
-                i18n.t("localMusic.reload"),
-                (!self.busy).then_some(Message::Reload)
-            ),
-            icon_button(
-                Icon::FolderPlus,
-                18.0,
-                text_color,
-                i18n.t("localMusic.importFolder"),
-                (!self.busy).then_some(Message::Import)
-            ),
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center);
-        let tools = container(tools).width(Length::Fill).align_x(Alignment::End).padding([56, 16]);
-
         let body: Element<'a, Message> = if let Some(error) = &self.error {
             container(text(error).color(muted)).center(Length::Fill).into()
         } else if self.tracks.is_empty() {
@@ -118,7 +111,7 @@ impl LibraryPage {
                 .into();
             wall.map(Message::Wall)
         };
-        stack![ground(theme), body, veil(daylight), tools].into()
+        stack![ground(theme), body, veil(daylight)].into()
     }
 }
 
