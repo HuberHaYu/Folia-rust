@@ -6,6 +6,8 @@ mod bodian;
 mod kugou;
 #[cfg(feature = "netease")]
 mod netease;
+#[cfg(feature = "qishui")]
+mod qishui;
 #[cfg(feature = "qq")]
 mod qq;
 
@@ -21,5 +23,7 @@ pub fn all(http: &reqwest::Client) -> Vec<Box<dyn Provider>> {
         Box::new(qq::Qq::new(http.clone())),
         #[cfg(feature = "bodian")]
         Box::new(bodian::Bodian::new(http.clone())),
+        #[cfg(feature = "qishui")]
+        Box::new(qishui::Qishui::new(http.clone())),
     ]
 }

@@ -7,11 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["netease", "kugou", "qq", "bodian"]
+default = ["netease", "kugou", "qq", "bodian", "qishui"]
 netease = []
 kugou = ["dep:flate2", "dep:num-bigint"]
 qq = ["dep:flate2", "dep:num-bigint"]
 bodian = []
+qishui = ["dep:ring"]
 
 [dependencies]
 folia-core.workspace = true
@@ -25,6 +26,7 @@ md-5.workspace = true
 num-bigint = { workspace = true, optional = true }
 qrcode.workspace = true
 reqwest.workspace = true
+ring = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
