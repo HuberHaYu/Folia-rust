@@ -145,6 +145,13 @@ trackCount_other = "{{count}} tracks"
 enqueueAll = "Add to queue"
 filterPlaceholder = "Filter this page"
 seamFoldStrip = "Fold the info strip"
+addToQueue = "Add to queue"
+enterPlayer = "Open the player"
+inQueue = "In queue"
+insertIntoQueue = "Insert into queue"
+pausePlayback = "Pause"
+playNow = "Play now"
+resumePlayback = "Resume"
 
 [libraryBravaisHome]
 search = "Search"

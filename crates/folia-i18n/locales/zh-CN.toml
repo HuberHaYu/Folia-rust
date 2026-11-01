@@ -145,6 +145,13 @@ trackCount_other = "{{count}} 首"
 enqueueAll = "加入队列"
 filterPlaceholder = "过滤当前页"
 seamFoldStrip = "折叠信息条"
+addToQueue = "加入队列"
+enterPlayer = "进入播放页"
+inQueue = "已在队列"
+insertIntoQueue = "插入队列"
+pausePlayback = "暂停"
+playNow = "立即播放"
+resumePlayback = "继续播放"
 
 [libraryBravaisHome]
 search = "搜索"

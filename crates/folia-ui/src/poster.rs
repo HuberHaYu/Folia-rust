@@ -234,21 +234,26 @@ pub struct Composition {
     /// Where the diagonal meets the left and right edges, in percent of the poster's height.
     pub divider: (f32, f32),
     pub underline: f32,
-    pub hero: (f32, f32),
+    /// The hero word's move in em and its turn in degrees.
+    pub hero: (f32, f32, f32),
     pub ghost_right: bool,
 }
 
-pub fn composition(seed: &str) -> Composition {
-    // `hashPosterSeed` (FNV-1a over UTF-16 units) and `createRandom` (mulberry32).
+/// `hashPosterSeed` (FNV-1a over UTF-16 units) feeding `createRandom` (mulberry32): the same seed, the same numbers.
+pub fn seeded(seed: &str) -> impl FnMut() -> f64 + use<> {
     let mut state =
         seed.encode_utf16().fold(2_166_136_261u32, |hash, unit| (hash ^ u32::from(unit)).wrapping_mul(16_777_619));
-    let mut random = move || {
+    move || {
         state = state.wrapping_add(0x6d2b_79f5);
         let mut value = state;
         value = (value ^ (value >> 15)).wrapping_mul(value | 1);
         value ^= value.wrapping_add((value ^ (value >> 7)).wrapping_mul(value | 61));
         f64::from(value ^ (value >> 14)) / 4_294_967_296.0
-    };
+    }
+}
+
+pub fn composition(seed: &str) -> Composition {
+    let mut random = seeded(&format!("album:{seed}"));
     let between = |min: f64, max: f64, random: &mut dyn FnMut() -> f64| (min + (max - min) * random()) as f32;
     let high = between(44.0, 50.0, &mut random);
     let low = between(56.0, 62.0, &mut random);
@@ -258,9 +263,9 @@ pub fn composition(seed: &str) -> Composition {
     let tape_x = between(28.0, 58.0, &mut random);
     let tape_deg = between(-5.0, 5.0, &mut random);
     let underline = between(38.0, 62.0, &mut random);
-    let hero = (between(0.04, 0.12, &mut random), between(0.12, 0.22, &mut random));
-    // The hero word's turn is drawn from the sequence too, so the ghost's side stays where the original puts it.
-    let _turn = (between(2.0, 7.0, &mut random), random());
+    let (hero_x, hero_y) = (between(0.04, 0.12, &mut random), between(0.12, 0.22, &mut random));
+    let turn = between(2.0, 7.0, &mut random);
+    let hero = (hero_x, hero_y, if random() < 0.5 { -turn } else { turn });
     let ghost_right = random() >= 0.5;
     Composition {
         cover_deg,
@@ -272,6 +277,11 @@ pub fn composition(seed: &str) -> Composition {
         ghost_right,
     }
 }
+
+/// `--bravais-poster-pad` on the album poster.
+pub const PAD: f32 = 40.0;
+/// The title's face: 900, drawn at the heaviest weight the fonts have.
+pub const TITLE_FONT: iced::Font = crate::typeface::font(iced::font::Weight::Black);
 
 /// `resolvePosterWidth`: 46% of the window, between 520 and 680.
 pub fn width(viewport: f32) -> f32 {
@@ -334,6 +344,22 @@ pub struct Ground<'a> {
     pub composition: Composition,
     pub ghost: String,
     pub cache: &'a Cache,
+    pub entry: crate::poster_motion::Entry,
+}
+
+/// What the ground is drawn from.
+#[derive(Debug, Clone, Copy)]
+pub struct Band<'a> {
+    pub palette: Palette,
+    pub composition: Composition,
+    pub ghost: &'a str,
+    pub entry: crate::poster_motion::Entry,
+}
+
+impl Ground<'_> {
+    fn band(&self) -> Band<'_> {
+        Band { palette: self.palette, composition: self.composition, ghost: &self.ghost, entry: self.entry }
+    }
 }
 
 impl<Message> Program<Message> for Ground<'_> {
@@ -347,7 +373,13 @@ impl<Message> Program<Message> for Ground<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        vec![self.cache.draw(renderer, bounds.size(), |frame| draw_ground(self, frame, bounds.size()))]
+        // During the entry the ground changes every frame and is drawn afresh; at rest it comes from the cache.
+        if self.entry.0.is_some() {
+            let mut frame = Frame::new(renderer, bounds.size());
+            draw_ground(&mut frame, bounds.size(), self.band());
+            return vec![frame.into_geometry()];
+        }
+        vec![self.cache.draw(renderer, bounds.size(), |frame| draw_ground(frame, bounds.size(), self.band()))]
     }
 }
 
@@ -355,11 +387,15 @@ fn faded(color: Color, alpha: f32) -> Color {
     Color { a: color.a * alpha, ..color }
 }
 
-fn draw_ground(ground: &Ground<'_>, frame: &mut Frame, size: Size) {
-    let Palette { paper, ink, block, .. } = ground.palette;
+/// Draws the poster's ground into `size` at the frame's origin; the wall draws it too while the layer tilts.
+pub fn draw_ground(frame: &mut Frame, size: Size, band: Band<'_>) {
+    let Palette { paper, ink, block, .. } = band.palette;
     let (w, h) = (size.width, size.height);
-    frame.fill_rectangle(Point::ORIGIN, size, block);
-    let (left, right) = (h * ground.composition.divider.0 / 100.0, h * ground.composition.divider.1 / 100.0);
+    frame.fill(&Path::rectangle(Point::ORIGIN, size), block);
+    // `bravais-album-paper-in`: the paper's lower edge comes up from the bottom to the diagonal.
+    let shut = band.entry.paper();
+    let (left, right) = (h * band.composition.divider.0 / 100.0, h * band.composition.divider.1 / 100.0);
+    let (left, right) = (h + (left - h) * shut, h + (right - h) * shut);
     let edge = |x: f32| left + (right - left) * (x / w.max(1.0));
     // `.bravais-album-paper`: down to the diagonal, a 1px ink dot at 20% every 9px.
     let paper_shape = Path::new(|path| {
@@ -385,15 +421,15 @@ fn draw_ground(ground: &Ground<'_>, frame: &mut Frame, size: Size) {
     });
     frame.fill(&dots, faded(ink, 0.2));
     // `.bravais-album-hatch`: 2px ink stripes every 9px at −58°, in a band 3.2% high under the diagonal.
-    let band = h * 0.032;
+    let strip = h * 0.032;
     let (dx, dy) = (58f32.to_radians().cos(), 58f32.to_radians().sin());
     let step = 9.0 / dy;
     let hatch = Path::new(|path| {
-        let mut x0 = -band / dy * dx - 9.0;
-        while x0 < w + band {
+        let mut x0 = -strip / dy * dx - 9.0;
+        while x0 < w + strip {
             let top = edge(x0.clamp(0.0, w));
             let start = Point::new(x0, top);
-            let end = Point::new(x0 - band / dy * dx, top + band);
+            let end = Point::new(x0 - strip / dy * dx, top + strip);
             if start.x >= 0.0 && start.x <= w || end.x >= 0.0 && end.x <= w {
                 path.move_to(start);
                 path.line_to(end);
@@ -401,9 +437,11 @@ fn draw_ground(ground: &Ground<'_>, frame: &mut Frame, size: Size) {
             x0 += step;
         }
     });
+    let hatch_alpha = band.entry.hatch();
     frame.with_clip(Rectangle::new(Point::ORIGIN, size), |frame| {
-        frame.stroke(&hatch, Stroke::default().with_color(ink).with_width(2.0));
+        frame.stroke(&hatch, Stroke::default().with_color(faded(ink, hatch_alpha)).with_width(2.0));
     });
+    let dots_alpha = band.entry.dots();
     // `.bravais-album-dots`: right −8%, bottom 6%, 64% × 34%, 1.4px paper dots at 18% every 10px, fading out.
     let (area_w, area_h) = (w * 0.64, h * 0.34);
     let (area_x, area_y) = (w * 1.08 - area_w, h * 0.94 - area_h);
@@ -416,7 +454,7 @@ fn draw_ground(ground: &Ground<'_>, frame: &mut Frame, size: Size) {
             let reach = ((x - center.x) / (area_w / 2.0)).hypot((y - center.y) / (area_h / 2.0));
             let mask = if reach <= 0.4 { 1.0 } else { ((1.0 - reach) / 0.6).clamp(0.0, 1.0) };
             if mask > 0.0 && x < w {
-                frame.fill(&Path::circle(Point::new(x, y), 1.4), faded(paper, 0.18 * mask));
+                frame.fill(&Path::circle(Point::new(x, y), 1.4), faded(paper, 0.18 * mask * dots_alpha));
             }
             x += 10.0;
         }
@@ -424,14 +462,14 @@ fn draw_ground(ground: &Ground<'_>, frame: &mut Frame, size: Size) {
     }
     // `.bravais-album-ghost`: min(420px, 52% high), its outline in paper at 16%.
     let size_px = 420f32.min(h * 0.52);
-    let ghost_x = if ground.composition.ghost_right { w + size_px * 0.18 } else { -size_px * 0.12 };
+    let ghost_x = if band.composition.ghost_right { w + size_px * 0.18 } else { -size_px * 0.12 };
     frame.fill_text(Text {
-        content: ground.ghost.clone(),
+        content: band.ghost.to_owned(),
         position: Point::new(ghost_x, h + size_px * 0.12),
-        color: faded(paper, 0.07),
+        color: faded(paper, 0.07 * dots_alpha),
         size: size_px.into(),
         font: crate::typeface::font(iced::font::Weight::Black),
-        align_x: if ground.composition.ghost_right {
+        align_x: if band.composition.ghost_right {
             iced::widget::text::Alignment::Right
         } else {
             iced::widget::text::Alignment::Left
@@ -442,63 +480,95 @@ fn draw_ground(ground: &Ground<'_>, frame: &mut Frame, size: Size) {
 }
 
 /// `.bravais-album-cover`: the cover turned on the page, a hard ink shadow 12px down-right, and a strip of tape.
-pub struct Cover {
+pub struct Cover<M> {
+    /// Tells where the cover is on screen when that changes: the flying cover lands there.
+    pub report: Option<fn(Rectangle) -> M>,
     pub image: Option<Handle>,
     pub palette: Palette,
     pub composition: Composition,
+    pub entry: crate::poster_motion::Entry,
+    /// Hidden while the flying cover is on its way (`data-flight="pending"`).
+    pub hidden: bool,
     /// The cover's side; the canvas leaves room round it for the turn, the shadow and the tape.
     pub side: f32,
 }
 
 pub const COVER_MARGIN: f32 = 28.0;
 
-impl<Message> Program<Message> for Cover {
-    type State = ();
+impl<Message> Program<Message> for Cover<Message> {
+    type State = Option<Rectangle>;
+
+    fn update(
+        &self,
+        state: &mut Option<Rectangle>,
+        _event: &canvas::Event,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        if *state == Some(bounds) {
+            return None;
+        }
+        *state = Some(bounds);
+        self.report.map(|report| canvas::Action::publish(report(bounds)))
+    }
 
     fn draw(
         &self,
-        _state: &(),
+        _state: &Option<Rectangle>,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let side = self.side;
+        if self.hidden {
+            return vec![frame.into_geometry()];
+        }
+        // `bravais-album-cover-in`: it falls 28px from 1.14 into place as it shows.
+        let (opacity, drop, grow) = self.entry.cover();
+        let side = self.side * grow;
         let angle = Radians(self.composition.cover_deg.to_radians());
-        let center = Point::new(COVER_MARGIN + side / 2.0, COVER_MARGIN + side / 2.0);
+        let center = Point::new(COVER_MARGIN + self.side / 2.0, COVER_MARGIN + self.side / 2.0 + drop);
         frame.with_save(|frame| {
             frame.translate(Vector::new(center.x, center.y));
             frame.rotate(angle);
-            frame.fill(
-                &Path::rectangle(Point::new(-side / 2.0 + 12.0, -side / 2.0 + 12.0), Size::new(side, side)),
-                self.palette.ink,
-            );
-            frame.fill(
-                &Path::rectangle(Point::new(-side / 2.0, -side / 2.0), Size::new(side, side)),
-                self.palette.block,
-            );
+            // The figure fades as one (`opacity` on the element): the shadow shows only outside the cover, and the
+            // block only where no picture covers it.
+            let (h, o) = (side / 2.0, 12.0);
+            let shadow = Path::new(|path| {
+                path.move_to(Point::new(h, -h + o));
+                path.line_to(Point::new(h + o, -h + o));
+                path.line_to(Point::new(h + o, h + o));
+                path.line_to(Point::new(-h + o, h + o));
+                path.line_to(Point::new(-h + o, h));
+                path.line_to(Point::new(h, h));
+                path.close();
+            });
+            frame.fill(&shadow, faded(self.palette.ink, opacity));
+            if self.image.is_none() {
+                frame.fill(
+                    &Path::rectangle(Point::new(-h, -h), Size::new(side, side)),
+                    faded(self.palette.block, opacity),
+                );
+            }
         });
         if let Some(image) = &self.image {
-            let rect = Rectangle::new(Point::new(COVER_MARGIN, COVER_MARGIN), Size::new(side, side));
-            frame.draw_image(rect, canvas::Image::new(image.clone()).rotation(angle));
+            let rect = Rectangle::new(Point::new(center.x - side / 2.0, center.y - side / 2.0), Size::new(side, side));
+            frame.draw_image(rect, canvas::Image::new(image.clone()).rotation(angle).opacity(opacity));
         }
-        // `.bravais-album-tape`: 30% wide, 24px, 12px above the top edge at `tape_x`, turned on its own.
+        // `.bravais-album-tape`: 30% wide, 24px, 12px above the top edge at `tape_x`, turned on its own; it slaps on last.
+        let (tape_alpha, tape_scale) = self.entry.tape();
         frame.with_save(|frame| {
             frame.translate(Vector::new(center.x, center.y));
             frame.rotate(angle);
-            let tape_center = Vector::new(-side / 2.0 + side * self.composition.tape_x / 100.0, -side / 2.0);
-            frame.translate(tape_center);
+            frame.translate(Vector::new(-side / 2.0 + side * self.composition.tape_x / 100.0, -side / 2.0));
             frame.rotate(Radians(self.composition.tape_deg.to_radians()));
+            frame.scale(tape_scale);
             let (tape_w, tape_h) = (side * 0.3, 24.0);
-            frame.fill(
-                &Path::rectangle(Point::new(-tape_w / 2.0, -tape_h / 2.0 + 1.0), Size::new(tape_w, tape_h)),
-                Color::from_rgba(0.0, 0.0, 0.0, 0.18),
-            );
-            frame.fill(
-                &Path::rectangle(Point::new(-tape_w / 2.0, -tape_h / 2.0), Size::new(tape_w, tape_h)),
-                Color::from_rgba8(214, 212, 204, 0.8),
-            );
+            let lift = Path::rectangle(Point::new(-tape_w / 2.0, -tape_h / 2.0 + 1.0), Size::new(tape_w, tape_h));
+            frame.fill(&lift, Color::from_rgba(0.0, 0.0, 0.0, 0.18 * tape_alpha));
+            let tape = Path::rectangle(Point::new(-tape_w / 2.0, -tape_h / 2.0), Size::new(tape_w, tape_h));
+            frame.fill(&tape, Color::from_rgba8(214, 212, 204, 0.8 * tape_alpha));
         });
         vec![frame.into_geometry()]
     }
@@ -508,6 +578,8 @@ impl<Message> Program<Message> for Cover {
 pub struct Underline {
     pub color: Color,
     pub width: f32,
+    /// `scale: 0 1` growing to 1 from the left edge.
+    pub drawn: f32,
 }
 
 impl<Message> Program<Message> for Underline {
@@ -524,7 +596,10 @@ impl<Message> Program<Message> for Underline {
         let mut frame = Frame::new(renderer, bounds.size());
         frame.translate(Vector::new(self.width / 2.0, bounds.height / 2.0));
         frame.rotate(Radians((-1f32).to_radians()));
-        frame.fill(&Path::rectangle(Point::new(-self.width / 2.0, -4.5), Size::new(self.width, 9.0)), self.color);
+        frame.fill(
+            &Path::rectangle(Point::new(-self.width / 2.0, -4.5), Size::new(self.width * self.drawn, 9.0)),
+            self.color,
+        );
         vec![frame.into_geometry()]
     }
 }

@@ -47,6 +47,10 @@ fn strip<'a>(host: &Host<'a>) -> Element<'a, Message> {
     };
     let body = if horizontal { row_body(host, ink) } else { column_body(host, ink) };
     let clipped = clip_body(host, body);
+    // While the layer turns with the poster, the wall draws the seam's ground turned; the plate would cover it.
+    if host.poster_tilted {
+        return clipped;
+    }
     stack![shader(plate).width(Length::Fill).height(Length::Fill), clipped].into()
 }
 
@@ -493,6 +497,7 @@ fn filter_field<'a>(host: &Host<'a>, seam: &super::LayerSeam, ink: Color) -> Ele
     let input = iced::widget::text_input(super::tr(host, "libraryBravais.filterPlaceholder"), &seam.query)
         .id(super::filter_id())
         .on_input(Message::Query)
+        .on_submit(Message::FilterSubmit)
         .size(13)
         .padding(0)
         .font(crate::typeface::font(iced::font::Weight::Semibold))
@@ -1107,29 +1112,43 @@ fn seam_shadow(host: &Host<'_>) -> [f32; 4] {
 }
 
 /// `BravaisSeamAlbumPoster`: the dotted paper with the cover taped on, the hatch, and the dark block with the
-/// kicker, the extruded title, the underline, the facts and the actions over the outlined watermark.
+/// kicker, the extruded title, the underline, the facts and the actions over the outlined watermark. Every part
+/// enters on its own beat (`bravaisAlbumPoster.css`).
 fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::AlbumSeam) -> Element<'a, Message> {
-    use crate::poster::{COVER_MARGIN, Cover, Ground, Underline};
-    use iced::widget::{canvas, rich_text, span};
-    const PAD: f32 = 40.0;
+    use crate::poster::{COVER_MARGIN, Cover, Ground, PAD, TITLE_FONT, Underline};
+    use crate::poster_motion::Title;
+    use iced::widget::canvas;
     let palette = album.palette;
+    let entry = album.entry;
     let (ink, paper) = (palette.ink, palette.paper);
+    let fade = |color: Color, alpha: f32| Color { a: color.a * alpha, ..color };
+    // A part rising in: faded, and lifted by a float only while it moves (a float sits above everything).
+    let rise = |element: Element<'a, Message>, (_, below): (f32, f32)| -> Element<'a, Message> {
+        if below > 0.01 {
+            iced::widget::float(element).translate(move |_, _| Vector::new(0.0, below)).into()
+        } else {
+            element
+        }
+    };
     let width = column_layout(host);
     let height = host.window_height;
-    let ground: Element<'a, Message> = match host.poster_ground {
-        Some(cache) => canvas(Ground { palette, composition: album.composition, ghost: album.ghost.clone(), cache })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+    let ground: Element<'a, Message> = match host.poster_ground.filter(|_| !host.poster_tilted) {
+        Some(cache) => {
+            canvas(Ground { palette, composition: album.composition, ghost: album.ghost.clone(), cache, entry })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
         None => space().into(),
     };
-    // `.bravais-poster-top`: back and crumbs in ink on the paper, then 「过滤当前页」.
+    // `.bravais-poster-top`: back and crumbs in ink on the paper, then 「过滤当前页」; it fades in after 200ms.
+    let top_ink = fade(ink, entry.top());
     let filter_face = row![
-        icon(Icon::ListFilter, 15.0, ink),
+        icon(Icon::ListFilter, 15.0, top_ink),
         text(super::tr(host, "libraryBravais.filterPlaceholder").to_owned())
             .size(13)
             .font(crate::typeface::font(iced::font::Weight::Bold))
-            .color(ink)
+            .color(top_ink)
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -1138,16 +1157,16 @@ fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::Alb
         .on_press(Message::OpenFilter)
         .style(move |_theme: &Theme, status| button::Style {
             background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                .then_some(Background::Color(Color { a: 0.1, ..ink })),
-            border: Border { radius: 0.0.into(), width: 1.5, color: ink },
+                .then_some(Background::Color(Color { a: 0.1 * top_ink.a, ..ink })),
+            border: Border { radius: 0.0.into(), width: 1.5, color: top_ink },
             ..button::Style::default()
         });
-    let top = row![container(crumbs(host, seam, ink, false)).width(Length::Fill), filter]
+    let top = row![container(crumbs(host, seam, top_ink, false)).width(Length::Fill), filter]
         .spacing(12)
         .align_y(Alignment::Center)
         .padding(iced::Padding { top: 18.0, right: PAD, bottom: 0.0, left: 20.0 });
-    // `.bravais-album-stage`: the cover, `min(56cqw, 33cqh)`, and the vertical scrap of title and year.
-    let desired = (width * 0.56).min(height * 0.33);
+    // `.bravais-album-stage`: the cover, `min(56cqw, 33cqh)`, centred in what the column leaves it.
+    let desired = ((width - 2.0 * album.inset) * 0.56).min(height * 0.33);
     let scrap: String = format!(
         "{}{}",
         seam.title,
@@ -1155,12 +1174,21 @@ fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::Alb
     );
     let image = album.cover.clone();
     let composition = album.composition;
-    // `.bravais-album-stage`: the cover, `min(56cqw, 33cqh)`, centred in what the column leaves it.
+    let hidden = album.flying;
+    let cover_entry = if album.flown { crate::poster_motion::Entry(None) } else { entry };
     let cover = iced::widget::responsive(move |room| {
         let side = desired.min(room.height - 18.0 - 2.0 * COVER_MARGIN + 24.0).max(48.0);
-        let cover = canvas(Cover { image: image.clone(), palette, composition, side })
-            .width(Length::Fixed(side + 2.0 * COVER_MARGIN))
-            .height(Length::Fixed(side + 2.0 * COVER_MARGIN));
+        let cover = canvas(Cover {
+            report: Some(Message::PosterCover),
+            image: image.clone(),
+            palette,
+            composition,
+            entry: cover_entry,
+            hidden,
+            side,
+        })
+        .width(Length::Fixed(side + 2.0 * COVER_MARGIN))
+        .height(Length::Fixed(side + 2.0 * COVER_MARGIN));
         container(cover)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1168,10 +1196,15 @@ fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::Alb
             .padding(iced::Padding { top: 18.0, right: PAD, bottom: 0.0, left: PAD + 18.0 - COVER_MARGIN })
             .into()
     });
-    let scrap =
-        container(tracked_col_weight(&scrap, 13.0, 0.3, Color { a: 0.85, ..ink }, iced::font::Weight::ExtraBold))
-            .max_height(height * 0.33 * 0.7)
-            .clip(true);
+    let scrap = container(tracked_col_weight(
+        &scrap,
+        13.0,
+        0.3,
+        fade(ink, 0.85 * entry.scrap()),
+        iced::font::Weight::ExtraBold,
+    ))
+    .max_height(height * 0.33 * 0.7)
+    .clip(true);
     let stage = stack![
         cover,
         container(scrap).width(Length::Fill).align_x(Alignment::End).padding(iced::Padding {
@@ -1182,58 +1215,59 @@ fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::Alb
         }),
     ]
     .height(Length::Fill);
-    // `.bravais-album-title`: `min(150px, 15cqh, (100cqw − 2·pad) / (columns + 1.4))`, cream with four steps of extrusion.
-    let size = 150f32.min(height * 0.15).min((width - 2.0 * PAD) / (album.columns + 1.4));
-    let layer = |color: Color| {
-        let spans: Vec<iced::widget::text::Span<'a, Message>> = album
-            .words
-            .iter()
-            .map(|(word, hero)| {
-                span(word.clone())
-                    .size(if *hero { size * 0.72 } else { size })
-                    .font(crate::typeface::font(iced::font::Weight::Black))
-                    .color(color)
-            })
-            .collect();
-        rich_text(spans).line_height(iced::widget::text::LineHeight::Relative(1.02)).width(Length::Fill)
-    };
-    let mut title = stack![];
-    for (step, color) in palette.extrude.iter().enumerate().rev() {
-        let offset = size * 0.025 * (step + 1) as f32;
-        title = title.push(container(layer(*color)).padding(iced::Padding {
-            top: offset,
-            right: 0.0,
-            bottom: 0.0,
-            left: offset,
-        }));
-    }
-    title = title.push(layer(palette.title));
+    // `.bravais-album-title`: drawn in a canvas so each word can fly in and the hero word can turn.
+    let layout = album.title.clone();
+    let title_height = layout.height + layout.size * 0.1;
+    let title = canvas(Title {
+        layout,
+        color: palette.title,
+        extrude: palette.extrude,
+        hero: album.composition.hero,
+        entry,
+        font: TITLE_FONT,
+    })
+    .width(Length::Fill)
+    .height(Length::Fixed(title_height));
+    let kicker_in = entry.kicker();
     let kicker = container(
-        text(album.kicker.clone()).size(12).font(crate::typeface::font(iced::font::Weight::ExtraBold)).color(paper),
+        text(album.kicker.clone())
+            .size(12)
+            .font(crate::typeface::font(iced::font::Weight::ExtraBold))
+            .color(fade(paper, kicker_in.0)),
     )
     .padding([6.0, 12.0])
     .style(move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(ink)),
+        background: Some(Background::Color(fade(ink, kicker_in.0))),
         ..container::Style::default()
     });
-    let underline_w = (width - 2.0 * PAD) * album.composition.underline / 100.0;
-    let underline = canvas(Underline { color: palette.accent, width: underline_w })
+    let underline_w = (width - 2.0 * PAD - 2.0 * album.inset) * album.composition.underline / 100.0;
+    let underline = canvas(Underline { color: palette.accent, width: underline_w, drawn: entry.underline() })
         .width(Length::Fixed(underline_w))
         .height(Length::Fixed(12.0));
     let title_block = column![
-        kicker,
+        rise(kicker.into(), kicker_in),
         container(title).padding(iced::Padding::ZERO.top(6.0)),
         container(underline).padding(iced::Padding::ZERO.top(12.0))
     ]
     .padding(iced::Padding { top: 28.0, right: PAD, bottom: 0.0, left: PAD });
-    // `.bravais-album-facts`: the artists underlined, the count, and the rest, with dots between.
+    // `.bravais-album-bottom > *`: the facts, the blurb, the status and the actions rise in turn.
+    let mut part = 0;
+    let mut next = || {
+        let beat = entry.bottom(part);
+        part += 1;
+        beat
+    };
+    let facts_in = next();
     let mut facts: Vec<Element<'a, Message>> = Vec::new();
-    let dot = || text("·").size(14).color(Color { a: 0.5, ..paper });
+    let facts_ink = fade(paper, facts_in.0);
+    let dot = || text("·").size(14).color(fade(facts_ink, 0.5));
     if !album.artists.is_empty() {
-        let name =
-            text(album.artists.clone()).size(19).font(crate::typeface::font(iced::font::Weight::Black)).color(paper);
+        let name = text(album.artists.clone())
+            .size(19)
+            .font(crate::typeface::font(iced::font::Weight::Black))
+            .color(facts_ink);
         let rule = container(space()).width(Length::Fill).height(Length::Fixed(2.0)).style(move |_theme: &Theme| {
-            container::Style { background: Some(Background::Color(paper)), ..container::Style::default() }
+            container::Style { background: Some(Background::Color(facts_ink)), ..container::Style::default() }
         });
         facts.push(iced::widget::column![name, rule].width(Length::Shrink).into());
     }
@@ -1242,38 +1276,32 @@ fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::Alb
             facts.push(dot().into());
         }
         facts.push(
-            text(fact.clone()).size(14).font(crate::typeface::font(iced::font::Weight::Bold)).color(paper).into(),
+            text(fact.clone()).size(14).font(crate::typeface::font(iced::font::Weight::Bold)).color(facts_ink).into(),
         );
     }
-    let mut bottom = column![row(facts).spacing(14).align_y(Alignment::End).wrap()].spacing(12);
+    let mut bottom = column![rise(row(facts).spacing(14).align_y(Alignment::End).wrap().into(), facts_in)].spacing(12);
     if let Some(about) = &album.description {
-        bottom = bottom.push(
-            container(
-                text(about.clone())
-                    .size(13)
-                    .color(Color { a: 0.74, ..paper })
-                    .wrapping(iced::widget::text::Wrapping::None),
-            )
-            .width(Length::Fill)
-            .clip(true),
-        );
+        let beat = next();
+        let blurb = container(
+            text(about.clone()).size(13).color(fade(paper, 0.74 * beat.0)).wrapping(iced::widget::text::Wrapping::None),
+        )
+        .width(Length::Fill)
+        .clip(true);
+        bottom = bottom.push(rise(blurb.into(), beat));
     }
     if let Some(status) = &host.status {
-        bottom = bottom.push(text(status.clone()).size(12).color(paper));
+        let beat = next();
+        bottom = bottom.push(rise(text(status.clone()).size(12).color(fade(paper, beat.0)).into(), beat));
     }
+    let actions_in = next();
+    let alpha = actions_in.0;
     // `.bravais-poster-button`: 46px, a 2px ink border and a hard 5px ink shadow; the first is the accent.
     let poster_button = |glyph: Icon, label: &'a str, primary: bool, message: Option<Message>| {
         let (fill, tint) = if primary { (palette.accent, paper) } else { (paper, ink) };
+        let weight = if primary { iced::font::Weight::Black } else { iced::font::Weight::ExtraBold };
         let face = row![
-            icon(glyph, 16.0, tint),
-            text(label)
-                .size(15)
-                .font(crate::typeface::font(if primary {
-                    iced::font::Weight::Black
-                } else {
-                    iced::font::Weight::ExtraBold
-                }))
-                .color(tint)
+            icon(glyph, 16.0, fade(tint, alpha)),
+            text(label).size(15).font(crate::typeface::font(weight)).color(fade(tint, alpha))
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -1294,9 +1322,13 @@ fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::Alb
                         fill
                     };
                     button::Style {
-                        background: Some(Background::Color(fill)),
-                        border: Border { radius: 0.0.into(), width: 2.0, color: ink },
-                        shadow: iced::Shadow { color: ink, offset: Vector::new(5.0, 5.0), blur_radius: 0.0 },
+                        background: Some(Background::Color(fade(fill, alpha))),
+                        border: Border { radius: 0.0.into(), width: 2.0, color: fade(ink, alpha) },
+                        shadow: iced::Shadow {
+                            color: fade(ink, alpha),
+                            offset: Vector::new(5.0, 5.0),
+                            blur_radius: 0.0,
+                        },
                         ..button::Style::default()
                     }
                 })
@@ -1318,21 +1350,22 @@ fn album_poster<'a>(host: &Host<'a>, seam: &super::LayerSeam, album: &super::Alb
         ),
     ];
     if let Some((saved, pending, title)) = &seam.star {
-        actions.push(star(*saved, *pending, title.clone(), palette.accent, paper));
+        actions.push(star(*saved, *pending, title.clone(), palette.accent, fade(paper, alpha)));
     }
     actions.push(chrome_button(
         Icon::Ellipsis,
         super::tr(host, "libraryBravaisCollection.more"),
         false,
-        paper,
+        fade(paper, alpha),
         Some(Message::CollectionMenu),
     ));
-    bottom = bottom.push(
-        container(row(actions).spacing(14).align_y(Alignment::Center).wrap()).padding(iced::Padding::ZERO.top(6.0)),
-    );
+    let actions =
+        container(row(actions).spacing(14).align_y(Alignment::Center).wrap()).padding(iced::Padding::ZERO.top(6.0));
+    bottom = bottom.push(rise(actions.into(), actions_in));
     let bottom =
         container(bottom).padding(iced::Padding { top: 20.0, right: PAD, bottom: 40.0 + host.bottom, left: PAD });
-    let ui = column![top, stage, title_block, bottom].width(Length::Fill).height(Length::Fill);
+    let ui = container(column![top, stage, title_block, bottom].width(Length::Fill).height(Length::Fill))
+        .padding(iced::Padding { top: 0.0, right: album.inset, bottom: 0.0, left: album.inset });
     let mut layers = stack![ground, ui].width(Length::Fixed(width)).height(Length::Fill);
     if seam.menu {
         // `.bravais-seam-more-anchor > .bravais-seam-menu`: above the actions.

@@ -145,6 +145,13 @@ trackCount_other = "{{count}} bài hát"
 enqueueAll = "Thêm vào hàng đợi"
 filterPlaceholder = "Lọc trang này"
 seamFoldStrip = "Gập thanh thông tin"
+addToQueue = "Thêm vào hàng đợi"
+enterPlayer = "Mở trình phát"
+inQueue = "Trong hàng đợi"
+insertIntoQueue = "Chèn vào hàng đợi"
+pausePlayback = "Tạm dừng"
+playNow = "Phát ngay"
+resumePlayback = "Tiếp tục"
 
 [libraryBravaisHome]
 search = "Tìm kiếm"

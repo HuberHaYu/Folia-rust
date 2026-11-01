@@ -87,6 +87,10 @@ pub enum Message {
     OpenList,
     /// 「过滤当前页」 on the album poster.
     OpenFilter,
+    /// Where the poster's cover canvas is on screen.
+    PosterCover(iced::Rectangle),
+    /// Enter in the collection filter.
+    FilterSubmit,
     ListScrolled(f32),
     LocateRow(usize),
     PlayRow(usize),
@@ -215,7 +219,9 @@ impl HomeChrome {
             | Message::LocateRow(_)
             | Message::PlayRow(_)
             | Message::CollectionMenu
-            | Message::RowHover(_) => {}
+            | Message::RowHover(_)
+            | Message::PosterCover(_)
+            | Message::FilterSubmit => {}
         }
     }
 
@@ -505,6 +511,8 @@ pub struct Host<'a> {
     pub layer: Option<LayerSeam>,
     /// The album poster's ground, drawn once for a size and palette.
     pub poster_ground: Option<&'a iced::widget::canvas::Cache>,
+    /// The layer is turned with the poster: its ground is drawn by the wall, turned with it.
+    pub poster_tilted: bool,
     /// The list row under the pointer.
     pub list_hover: Option<usize>,
 }
@@ -549,8 +557,15 @@ pub struct AlbumSeam {
     pub description: Option<String>,
     /// The watermark: the hero word's last character, else the title's.
     pub ghost: String,
-    pub words: Vec<(String, bool)>,
-    pub columns: f32,
+    /// The title wrapped into the poster's column.
+    pub title: std::rc::Rc<crate::poster_motion::TitleLayout>,
+    pub entry: crate::poster_motion::Entry,
+    /// The cover is flying in from the wall; the poster's own stays hidden until it lands.
+    pub flying: bool,
+    /// The cover came by flight, so it does not fall in as well (`.bravais-album-cover[data-flight]`).
+    pub flown: bool,
+    /// How far the content stays in from both sides while the layer turns (the safe area).
+    pub inset: f32,
 }
 
 /// One row of the song list (`BravaisListPanel`): number, title over artist, length.

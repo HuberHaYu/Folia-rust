@@ -145,6 +145,13 @@ trackCount_other = "{{count}} lagu"
 enqueueAll = "Tambah ke antrean"
 filterPlaceholder = "Saring halaman ini"
 seamFoldStrip = "Lipat strip info"
+addToQueue = "Tambah ke antrean"
+enterPlayer = "Buka pemutar"
+inQueue = "Sudah di antrean"
+insertIntoQueue = "Sisipkan ke antrean"
+pausePlayback = "Jeda"
+playNow = "Putar sekarang"
+resumePlayback = "Lanjutkan"
 
 [libraryBravaisHome]
 search = "Cari"

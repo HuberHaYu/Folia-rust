@@ -81,6 +81,18 @@ pub struct Poster {
     pub composition: crate::poster::Composition,
     /// The ground drawn once for a size and palette.
     pub ground: iced::widget::canvas::Cache,
+    /// When the poster last came on screen: its entry plays from here (every mount, as the original's).
+    pub entered: Option<Instant>,
+    /// The cover flew in from the wall.
+    pub flown: bool,
+    /// The watermark: the hero word's last character, else the title's.
+    pub ghost: String,
+    /// The colours were read (or could not be); the shards wait for them.
+    pub palette_read: bool,
+    /// The album wall's art was asked for.
+    art_asked: bool,
+    /// The title wrapped for the last column width and size it was asked for.
+    title: std::cell::RefCell<Option<std::rc::Rc<crate::poster_motion::TitleLayout>>>,
 }
 
 impl Layer {
@@ -92,6 +104,17 @@ impl Layer {
             published: None,
             composition: crate::poster::composition(&format!("collection:{}:{}", collection.provider, collection.id)),
             ground: iced::widget::canvas::Cache::new(),
+            entered: None,
+            title: std::cell::RefCell::new(None),
+            flown: false,
+            ghost: {
+                let words = crate::poster::hero_split(&collection.name);
+                let hero = words.iter().find(|(_, hero)| *hero).map(|(text, _)| text.as_str());
+                hero.unwrap_or(&collection.name).chars().last().map(String::from).unwrap_or_default()
+            },
+            // An album with no cover has no colours to wait for.
+            palette_read: collection.cover_url.is_none(),
+            art_asked: false,
         });
         Self {
             collection,
@@ -112,7 +135,7 @@ impl Layer {
 
     /// `poster && level === 'full' && !filterOpen`: the list panel and the filter take the poster's place.
     pub fn shows_poster(&self) -> bool {
-        self.poster.is_some() && !self.list && !self.filter_open && self.query.is_empty()
+        self.poster.is_some() && !self.list && !self.filter_open
     }
 
     /// `contextTracks`: the songs the filter keeps, or all of them, by index into `tracks`.
@@ -153,6 +176,14 @@ impl Layer {
     }
 }
 
+/// What the focus card shows of the player.
+#[derive(Debug, Clone, Copy)]
+pub struct CardLook {
+    pub queued: bool,
+    pub playing: bool,
+    pub window_width: f32,
+}
+
 /// What the shell does after a page message.
 pub enum Effect {
     Play {
@@ -160,6 +191,12 @@ pub enum Effect {
         index: usize,
         origin: Option<String>,
     },
+    /// The focus card's play on the playing song: pause or resume.
+    Toggle,
+    /// The focus card's 「进入」: the playing page.
+    EnterPlayer,
+    /// The focus card's queue button: added, or moved to the end when queued (`applyQueueAddBehavior`).
+    EnqueueOne(Track),
     /// Personal FM's first batch; `fm` is the feed later batches come from.
     PlayFm {
         queue: Vec<Track>,
@@ -186,6 +223,17 @@ pub struct LibraryPage {
     source: Option<Source>,
     /// The song to centre on once the collection being opened for 「定位」 has its tracks.
     locating: Option<i64>,
+    /// The player bar's safe area at the bottom, which a revealed card stays above.
+    pub bottom_inset: f32,
+    /// The song playing, for the focus card's play turning into pause / resume.
+    pub playing_id: Option<i64>,
+    /// The tile last activated, where an album's cover flies out from.
+    pressed: Option<(usize, crate::focus_card::SlotId)>,
+    /// The poster's cover canvas on screen, and the cover in flight.
+    poster_cover: Option<iced::Rectangle>,
+    flight: Option<crate::cover_flight::Flight>,
+    /// The flight back lands on the tile of this collection.
+    flight_home: Option<i64>,
 }
 
 /// The wall a queue was started from: a tab's own wall or a collection's.
@@ -214,6 +262,17 @@ pub enum Message {
     PosterPalette(String, Option<crate::poster::Palette>),
     /// 「过滤当前页」 on the poster.
     OpenFilter,
+    /// Enter in the filter: editing ends and the wall takes the keyboard focus (`focusFirst`).
+    FilterSubmit,
+    /// A button on the focus card.
+    Card(crate::focus_card::Action),
+    /// A key on the wall (`resolveBravaisKey`).
+    Key(crate::focus_card::Key),
+    /// Where the poster's cover canvas is on screen.
+    PosterCoverAt(iced::Rectangle),
+    /// The album wall's mosaic cover, and one cover baked into a shard with its spots.
+    AlbumMosaic(String, Option<iced::widget::image::Handle>),
+    AlbumShard(String, String, Option<(iced::widget::image::Handle, Vec<(f32, f32)>)>),
     Back,
     PlayAll,
     EnqueueAll,
@@ -248,6 +307,12 @@ impl LibraryPage {
             layer: None,
             source: None,
             locating: None,
+            bottom_inset: 0.0,
+            playing_id: None,
+            pressed: None,
+            poster_cover: None,
+            flight: None,
+            flight_home: None,
             tiles: Vec::new(),
             actions: Vec::new(),
         };
@@ -277,7 +342,241 @@ impl LibraryPage {
     }
 
     pub fn coasting(&self) -> bool {
+        let now = Instant::now();
         self.wall.coasting()
+            || self.wall.focus.animating(now)
+            || self.poster_entry(now).0.is_some()
+            || self.flight.as_ref().is_some_and(|flight| flight.alive(now))
+            || self.wall.tilt.running(now)
+    }
+
+    /// The layer is turned with the poster: the seam's own ground and strip give way to the wall's turned band.
+    pub fn poster_tilted(&self) -> bool {
+        self.wall.tilted(Instant::now())
+    }
+
+    /// Where the album poster's entry is.
+    fn poster_entry(&self, now: Instant) -> crate::poster_motion::Entry {
+        let at = self.layer.as_ref().and_then(|layer| layer.poster.as_ref()).and_then(|poster| poster.entered);
+        let ms = at.map(|at| now.saturating_duration_since(at).as_secs_f32() * 1000.0);
+        crate::poster_motion::Entry(ms.filter(|ms| *ms < crate::poster_motion::ENTRY_MS))
+    }
+
+    /// `activate`: a song grows into the focus card (a second click on it does nothing); anything else opens.
+    fn activate(
+        &mut self,
+        index: usize,
+        slot: crate::focus_card::SlotId,
+        i18n: &I18n,
+    ) -> (Task<Message>, Option<Effect>) {
+        self.wall.focus_slot(Some(slot), false, self.bottom_inset);
+        self.pressed = Some((index, slot));
+        if self.is_song(index) {
+            if self.wall.focus.expanded().is_none_or(|(open, _)| open != slot) {
+                self.wall.expand(slot, index, self.bottom_inset);
+            }
+            return (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None);
+        }
+        self.wall.collapse();
+        let pressed = self.press(index, i18n);
+        self.pressed = None;
+        pressed
+    }
+
+    fn is_song(&self, index: usize) -> bool {
+        matches!(self.actions.get(index), Some(Action::Local(_) | Action::LayerTrack(_) | Action::Song { .. }))
+    }
+
+    /// `assignAlbumCoverArt` once the album's songs and colours are in: the mosaic's big cover, or each shard's
+    /// cover read for its spots and baked into the poster's duotone.
+    fn album_art(&mut self) -> Task<Message> {
+        let Some(omni) = self.online.omni().cloned() else { return Task::none() };
+        let Some(layer) = self.layer.as_mut() else { return Task::none() };
+        let Some(tracks) = layer.tracks.ready() else { return Task::none() };
+        let Some(poster) = layer.poster.as_mut().filter(|poster| poster.palette_read && !poster.art_asked) else {
+            return Task::none();
+        };
+        poster.art_asked = true;
+        let palette = poster.palette.unwrap_or(crate::poster::FALLBACK);
+        let id = layer.collection.id.clone();
+        let mut album = crate::album_wall::AlbumWall { stand_in: poster.cover.clone(), ..Default::default() };
+        let task = match crate::album_wall::assign(tracks, layer.collection.cover_url.as_deref()) {
+            crate::album_wall::Assignment::Mosaic(url) => {
+                // `BRAVAIS_ALBUM_MOSAIC_PX` drawn at the wall's scale lands on the largest cover step.
+                Task::perform(crate::background::online_cover(omni, url, 1024), move |cover| {
+                    let image = cover
+                        .map(|cover| iced::widget::image::Handle::from_rgba(cover.width, cover.height, cover.rgba));
+                    Message::AlbumMosaic(id.clone(), image)
+                })
+            }
+            crate::album_wall::Assignment::Shards(urls) => {
+                album.dots = Some(crate::album_wall::dots());
+                let mut wanted: Vec<String> = urls.into_iter().flatten().collect();
+                wanted.sort();
+                wanted.dedup();
+                Task::batch(wanted.into_iter().map(|url| {
+                    let (omni, id, key) = (omni.clone(), id.clone(), url.clone());
+                    Task::perform(
+                        async move {
+                            let sample =
+                                crate::background::online_cover_sized(omni.clone(), url.clone(), 128, 50).await;
+                            let spots = sample
+                                .map(|sample| crate::album_wall::find_spots(&sample.rgba, sample.width as usize))
+                                .unwrap_or_default();
+                            let cover = crate::background::online_cover(omni, url, 512).await?;
+                            let pixels = crate::album_wall::duotone(&cover.rgba, palette.accent, palette.block);
+                            Some((iced::widget::image::Handle::from_rgba(cover.width, cover.height, pixels), spots))
+                        },
+                        move |art| Message::AlbumShard(id.clone(), key.clone(), art),
+                    )
+                }))
+            }
+            crate::album_wall::Assignment::Plain => Task::none(),
+        };
+        self.wall.album = Some(album);
+        task
+    }
+
+    /// The poster's cover as the flight sees it: the canvas less its margin, turned by the composition.
+    fn poster_quad(&self) -> Option<crate::cover_flight::Quad> {
+        let rect = self.poster_cover?;
+        let deg = self.layer.as_ref()?.poster.as_ref()?.composition.cover_deg;
+        let side = rect.width - 2.0 * crate::poster::COVER_MARGIN;
+        let margin = crate::poster::COVER_MARGIN;
+        let center = iced::Point::new(rect.x + margin + side / 2.0, rect.y + margin + side / 2.0);
+        (side > 1.0).then_some(crate::cover_flight::Quad {
+            center,
+            size: iced::Size::new(side, side),
+            angle: deg.to_radians(),
+        })
+    }
+
+    /// Where the flight is headed this frame: the poster's cover, or the collection's tile on the wall.
+    fn flight_target(&self) -> Option<crate::cover_flight::Quad> {
+        let flight = self.flight.as_ref()?;
+        if !flight.back {
+            return self.layer.as_ref().filter(|layer| layer.shows_poster()).and(self.poster_quad());
+        }
+        let id = self.flight_home?;
+        let index = self.tiles.iter().position(|tile| tile.id == id)?;
+        let rect = self.wall.slot_screen(self.wall.slot_of(index)?)?;
+        Some(crate::cover_flight::Quad::of(rect, 0.0))
+    }
+
+    /// The flying cover, drawn over the wall and the seam.
+    pub fn flight_view(&self, now: Instant) -> Option<Element<'_, Message>> {
+        let flight = self.flight.as_ref().filter(|flight| flight.alive(now))?;
+        Some(canvas(crate::cover_flight::Overlay { flight, now }).width(Length::Fill).height(Length::Fill).into())
+    }
+
+    /// The song a tile shows, for the focus card.
+    fn track_of(&self, index: usize) -> Option<&Track> {
+        match self.actions.get(index)? {
+            Action::Local(at) => self.tracks.get(*at),
+            Action::LayerTrack(at) => self.layer.as_ref()?.tracks.ready()?.get(*at),
+            Action::Song { section, song } => self
+                .online
+                .explore
+                .ready()?
+                .get(*section)?
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    ExploreEntry::Song(track) => Some(track),
+                    ExploreEntry::Collection(_) => None,
+                })
+                .nth(*song),
+            _ => None,
+        }
+    }
+
+    /// The grown card's song.
+    pub fn expanded_track(&self) -> Option<&Track> {
+        let (_, tile) = self.wall.focus.expanded()?;
+        self.track_of(tile)
+    }
+
+    fn card_action(&mut self, action: crate::focus_card::Action, i18n: &I18n) -> (Task<Message>, Option<Effect>) {
+        let Some((_, tile)) = self.wall.focus.expanded() else { return (Task::none(), None) };
+        let current = self.playing_id.is_some() && self.playing_id == self.track_of(tile).map(|track| track.id);
+        match action {
+            crate::focus_card::Action::Play if current => (Task::none(), Some(Effect::Toggle)),
+            crate::focus_card::Action::Play => self.press(tile, i18n),
+            crate::focus_card::Action::Enter => (Task::none(), Some(Effect::EnterPlayer)),
+            crate::focus_card::Action::Enqueue => (Task::none(), self.track_of(tile).cloned().map(Effect::EnqueueOne)),
+        }
+    }
+
+    /// The filter is being edited: Esc goes to it before the wall.
+    pub fn filter_editing(&self) -> bool {
+        self.layer.as_ref().is_some_and(|layer| layer.filter_open)
+    }
+
+    /// The wall's keys, Esc taking one step of its ladder (`resolveEscapeStep`).
+    fn key(&mut self, key: crate::focus_card::Key, i18n: &I18n) -> (Task<Message>, Option<Effect>) {
+        use crate::focus_card::Key;
+        let bottom = self.bottom_inset;
+        match key {
+            Key::Escape => {
+                // The filter's own Esc first (`BravaisSeamFilterField`): a word is cleared, an empty field closes.
+                if let Some(layer) = self.layer.as_mut().filter(|layer| layer.filter_open) {
+                    if layer.query.is_empty() {
+                        layer.filter_open = false;
+                        return (Task::none(), None);
+                    }
+                    return self.update(Message::Query(String::new()), i18n);
+                }
+                if self.wall.focus.expanded().is_some() {
+                    self.wall.collapse();
+                } else if self.wall.focus.keyboard().is_some() {
+                    self.wall.focus_slot(None, false, bottom);
+                } else if self.layer.as_ref().is_some_and(|layer| layer.list) {
+                    return self.update(Message::CloseList, i18n);
+                } else if self.layer.as_ref().is_some_and(|layer| !layer.query.is_empty()) {
+                    return self.update(Message::Query(String::new()), i18n);
+                } else if self.layer.is_some() {
+                    return self.update(Message::Back, i18n);
+                }
+                (Task::none(), None)
+            }
+            Key::Move(direction) => {
+                let next = self.wall.neighbour(direction, &self.tiles);
+                if next.is_some() {
+                    self.wall.focus_slot(next, true, bottom);
+                }
+                (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None)
+            }
+            Key::First | Key::Last => {
+                // `first` is rank 0 of a finite wall or the start tile of an endless one; only a finite wall has a last.
+                let wanted = match key {
+                    Key::First => Some(0),
+                    _ => self.wall.finite_count().map(|count| count.saturating_sub(1)),
+                };
+                if let Some(slot) = wanted.and_then(|index| self.wall.slot_of(index)) {
+                    self.wall.focus_slot(Some(slot), true, bottom);
+                }
+                (Task::none(), None)
+            }
+            Key::Page(direction) => {
+                self.wall.page(direction);
+                (Task::none(), None)
+            }
+            Key::Enter | Key::Enqueue => {
+                let Some((tile, slot)) = self.wall.keyboard_tile() else { return (Task::none(), None) };
+                let song = self.is_song(tile);
+                let open = self.wall.focus.expanded().is_some_and(|(expanded, _)| expanded == slot);
+                match (key, song) {
+                    (Key::Enter, false) => self.activate(tile, slot, i18n),
+                    (Key::Enter, true) if open => self.card_action(crate::focus_card::Action::Play, i18n),
+                    (Key::Enter, true) => {
+                        self.wall.expand(slot, tile, bottom);
+                        (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None)
+                    }
+                    (_, true) => (Task::none(), self.track_of(tile).cloned().map(Effect::EnqueueOne)),
+                    _ => (Task::none(), None),
+                }
+            }
+        }
     }
 
     pub fn hint_busy(&self, now: Instant) -> bool {
@@ -342,9 +641,28 @@ impl LibraryPage {
         self.layer.as_ref().is_some_and(|layer| layer.menu)
     }
 
-    pub fn set_tab_chrome(&self, home: &mut crate::home::HomeChrome, now: Instant) {
+    pub fn set_tab_chrome(&mut self, home: &mut crate::home::HomeChrome, now: Instant) {
         let list = self.layer.as_ref().is_some_and(|layer| layer.list);
         let poster = self.layer.as_ref().is_some_and(Layer::shows_poster);
+        // `has-album-wall`: only while the poster is on screen; the stand-in is the poster's cover once it arrives.
+        let stand_in = self.layer.as_ref().and_then(|layer| layer.poster.as_ref()).and_then(|art| art.cover.clone());
+        // `useBravaisPosterTilt`: the layer turns while a poster stands in an upright seam.
+        let upright = !self.wall.seam().horizontal && self.wall.seam().width > 0.0;
+        self.wall.tilt.set(poster && upright, now);
+        if let Some(album) = self.wall.album.as_mut() {
+            album.mosaic_on = poster;
+            if album.stand_in.is_none() {
+                album.stand_in = stand_in;
+            }
+        }
+        // The poster mounts: its entry starts; it leaves (list, filter): the next mount plays it again.
+        if let Some(art) = self.layer.as_mut().and_then(|layer| layer.poster.as_mut()) {
+            match (poster, art.entered) {
+                (true, None) => art.entered = Some(now),
+                (false, Some(_)) => art.entered = None,
+                _ => {}
+            }
+        }
         home.set_collection(self.layer.is_some(), list, poster, now);
     }
 
@@ -398,14 +716,73 @@ impl LibraryPage {
                 let (task, pressed) = self.wall.update(message, &self.tiles, self.online.omni());
                 let task = task.map(Message::Wall);
                 match pressed {
-                    Some(index) => {
-                        let (more, effect) = self.press(index, i18n);
+                    Some(Some((index, slot))) => {
+                        let (more, effect) = self.activate(index, slot, i18n);
                         (Task::batch([task, more]), effect)
+                    }
+                    Some(None) => {
+                        self.wall.collapse();
+                        (task, None)
                     }
                     None => (task, None),
                 }
             }
+            Message::Card(action) => self.card_action(action, i18n),
+            Message::PosterCoverAt(rect) => {
+                self.poster_cover = Some(rect);
+                (Task::none(), None)
+            }
+            Message::AlbumMosaic(id, image) => {
+                if self.layer.as_ref().is_some_and(|layer| layer.collection.id == id)
+                    && let Some(album) = self.wall.album.as_mut()
+                {
+                    album.mosaic = image;
+                }
+                (Task::none(), None)
+            }
+            Message::AlbumShard(id, url, art) => {
+                let layer = self.layer.as_ref().filter(|layer| layer.collection.id == id);
+                let (Some(layer), Some((duotone, spots))) = (layer, art) else { return (Task::none(), None) };
+                let tracks = layer.tracks.ready().map(Vec::as_slice).unwrap_or_default();
+                let assigned = crate::album_wall::assign(tracks, layer.collection.cover_url.as_deref());
+                if let (crate::album_wall::Assignment::Shards(urls), Some(album)) = (assigned, self.wall.album.as_mut())
+                {
+                    for (track, wanted) in tracks.iter().zip(urls) {
+                        if wanted.as_deref() == Some(url.as_str()) {
+                            let seed = match &track.online {
+                                Some(online) => format!("online:{}:{}", online.provider, online.id),
+                                None => format!("local:{}", track.id),
+                            };
+                            let shard =
+                                crate::album_wall::Shard { duotone: duotone.clone(), spots: spots.clone(), seed };
+                            album.shards.insert(track.id, shard);
+                        }
+                    }
+                }
+                (Task::none(), None)
+            }
+            Message::Key(key) => self.key(key, i18n),
+            Message::FilterSubmit => {
+                if let Some(layer) = self.layer.as_mut() {
+                    layer.filter_open = false;
+                }
+                let first = self.wall.neighbour(crate::focus_card::Direction::Down, &self.tiles);
+                self.wall.focus_slot(first, true, self.bottom_inset);
+                (Task::none(), None)
+            }
             Message::Frame => {
+                let now = Instant::now();
+                let target = self.flight_target();
+                if let Some(flight) = self.flight.as_mut() {
+                    flight.step(target, now);
+                    if !flight.alive(now) {
+                        self.flight = None;
+                    }
+                }
+                if (self.wall.focus.animating(now) || self.wall.focus.expanded().is_some()) && self.wall.tick_focus(now)
+                {
+                    return (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None);
+                }
                 if self.wall.tick_coast(Instant::now()) {
                     return (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None);
                 }
@@ -450,7 +827,8 @@ impl LibraryPage {
                     }
                 };
                 layer.refilter();
-                let rebuilt = self.rebuild(i18n);
+                let art = self.album_art();
+                let rebuilt = Task::batch([self.rebuild(i18n), art]);
                 let located = match self.locating.take() {
                     Some(track) => self.center_on_track(track),
                     None => Task::none(),
@@ -476,9 +854,10 @@ impl LibraryPage {
                     .and_then(|layer| layer.poster.as_mut())
                 {
                     poster.palette = palette;
+                    poster.palette_read = true;
                     poster.ground.clear();
                 }
-                (Task::none(), None)
+                (self.album_art(), None)
             }
             Message::OpenFilter => {
                 if let Some(layer) = self.layer.as_mut() {
@@ -493,7 +872,23 @@ impl LibraryPage {
                     layer.list = false;
                     return (Task::none(), None);
                 }
+                // `flyCoverBack`: from the poster's cover back onto the album's tile on the wall.
+                let back = self.layer.as_ref().filter(|layer| layer.shows_poster()).and_then(|layer| {
+                    let image = layer.poster.as_ref()?.cover.clone()?;
+                    Some((
+                        image,
+                        layer.collection.wall_id(),
+                        layer.poster.as_ref()?.palette.unwrap_or(crate::poster::FALLBACK).ink,
+                    ))
+                });
+                let from = self.poster_quad();
                 self.layer = None;
+                self.wall.album = None;
+                self.poster_cover = None;
+                if let (Some((image, home, ink)), Some(from)) = (back, from) {
+                    self.flight = Some(crate::cover_flight::Flight::new(image, from, true, ink, Instant::now()));
+                    self.flight_home = Some(home);
+                }
                 (self.rebuild(i18n), None)
             }
             Message::PlayAll => {
@@ -679,7 +1074,30 @@ impl LibraryPage {
             }
             _ => Task::none(),
         };
+        let album = collection.kind == CollectionKind::Album;
+        let source = self.pressed.take().filter(|_| album).and_then(|(tile, slot)| {
+            let rect = self.wall.slot_screen(slot)?;
+            let image = self.wall.cover(self.tiles.get(tile)?.id)?;
+            Some((rect, image))
+        });
         self.layer = Some(Layer::new(collection, tracks));
+        self.poster_cover = None;
+        self.wall.album = None;
+        // `flyCoverToPoster`: from the tile that was clicked to the poster's cover, which hides until it lands.
+        if let Some((rect, image)) = source {
+            let ink = crate::poster::FALLBACK.ink;
+            let now = Instant::now();
+            self.flight = Some(crate::cover_flight::Flight::new(
+                image,
+                crate::cover_flight::Quad::of(rect, 0.0),
+                false,
+                ink,
+                now,
+            ));
+            if let Some(poster) = self.layer.as_mut().and_then(|layer| layer.poster.as_mut()) {
+                poster.flown = true;
+            }
+        }
         Task::batch([fetch, art, self.rebuild(i18n)])
     }
 
@@ -860,7 +1278,13 @@ impl LibraryPage {
         shown.then(|| self.online.can_refresh_explore())
     }
 
-    pub fn layer_seam(&self, i18n: &I18n, playing: Option<i64>, rows_in_view: usize) -> Option<crate::home::LayerSeam> {
+    pub fn layer_seam(
+        &self,
+        i18n: &I18n,
+        playing: Option<i64>,
+        rows_in_view: usize,
+        window: iced::Size,
+    ) -> Option<crate::home::LayerSeam> {
         let layer = self.layer.as_ref()?;
         let tracks = layer.tracks.ready().map(Vec::as_slice).unwrap_or_default();
         let context = layer.context();
@@ -923,8 +1347,10 @@ impl LibraryPage {
                 let year = poster.published.map(crate::poster::year_of);
                 let kind = i18n.t(kind_label(CollectionKind::Album));
                 let words = crate::poster::hero_split(&layer.collection.name);
-                let hero = words.iter().find(|(_, hero)| *hero).map(|(text, _)| text.as_str());
-                let ghost = hero.unwrap_or(&layer.collection.name).chars().last().map(String::from).unwrap_or_default();
+                let ghost = poster.ghost.clone();
+                // The turned poster's safe area: the paper's edge moves this far in at the top and bottom.
+                let deg = self.wall.tilt.deg(Instant::now());
+                let inset = window.height / 2.0 * deg.abs().to_radians().tan();
                 crate::home::AlbumSeam {
                     palette: poster.palette.unwrap_or(crate::poster::FALLBACK),
                     composition: poster.composition,
@@ -935,8 +1361,31 @@ impl LibraryPage {
                     facts: (total > 0).then(|| track_count(i18n, total as u32)).into_iter().collect(),
                     description: layer.collection.description.clone().filter(|text| !text.trim().is_empty()),
                     ghost,
-                    columns: crate::poster::title_columns(&layer.collection.name),
-                    words,
+                    title: {
+                        // `--album-title-size`: min(150px, 15cqh, (100cqw − 2·pad) / (columns + 1.4)).
+                        let column = crate::poster::width(window.width) - 2.0 * crate::poster::PAD - 2.0 * inset;
+                        let size = 150f32
+                            .min(window.height * 0.15)
+                            .min(column / (crate::poster::title_columns(&layer.collection.name) + 1.4));
+                        let mut kept = poster.title.borrow_mut();
+                        match kept.as_ref().filter(|title| title.width == column && title.size == size) {
+                            Some(title) => title.clone(),
+                            None => {
+                                let laid = std::rc::Rc::new(crate::poster_motion::layout_title(
+                                    &words,
+                                    size,
+                                    column,
+                                    crate::poster::TITLE_FONT,
+                                ));
+                                *kept = Some(laid.clone());
+                                laid
+                            }
+                        }
+                    },
+                    entry: self.poster_entry(Instant::now()),
+                    flying: self.flight.as_ref().is_some_and(crate::cover_flight::Flight::pending),
+                    flown: poster.flown,
+                    inset,
                 }
             }),
         })
@@ -982,15 +1431,42 @@ impl LibraryPage {
         i18n: &'a I18n,
         theme: &'a Theme,
         daylight: bool,
-        _text_color: Color,
         muted: Color,
         playing: Option<i64>,
+        look: CardLook,
     ) -> Element<'a, Message> {
-        let wall: Element<'a, wall::Message> = canvas(self.wall.view(&self.tiles, theme, daylight, playing))
+        let band =
+            self.layer.as_ref().filter(|layer| layer.shows_poster()).and_then(|layer| layer.poster.as_ref()).map(
+                |poster| crate::poster::Band {
+                    palette: poster.palette.unwrap_or(crate::poster::FALLBACK),
+                    composition: poster.composition,
+                    ghost: &poster.ghost,
+                    entry: self.poster_entry(Instant::now()),
+                },
+            );
+        let wall: Element<'a, wall::Message> = canvas(self.wall.view(&self.tiles, theme, daylight, playing, band))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
         let mut layers = stack![ground(theme), wall.map(Message::Wall)];
+        // The focus card's body over its grown tile.
+        if let (Some((tile, rect, scale)), Some(_)) =
+            (self.wall.expanded_screen(Instant::now()), self.wall.focus.expanded())
+            && let Some(track) = self.track_of(tile)
+        {
+            let card = crate::focus_card::Card {
+                track,
+                queued: look.queued,
+                current: playing == Some(track.id),
+                playing: look.playing,
+                rect,
+                scale,
+                ink: folia_visualizer::color(theme.primary, 1.0),
+                window_width: look.window_width,
+            };
+            let reveal = self.wall.focus.actions_reveal(Instant::now());
+            layers = layers.push(crate::focus_card::body(i18n, card, reveal).map(Message::Card));
+        }
         let local_error = self.tab == HomeTab::Local && self.layer.is_none() && self.error.is_some();
         if let (false, Some((title, body)), true) =
             (local_error, self.hint_text(i18n), self.wall.viewport().width > 1.0)

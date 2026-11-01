@@ -64,6 +64,8 @@ pub struct Lot {
     pub heading: Seat,
     pub tiles: Vec<usize>,
     pub seats: Vec<Seat>,
+    /// `mirrorsOf(section, part)`: how its two squares are mirrored.
+    pub mirrors: u32,
 }
 
 /// `buildStrip`: every section's lots in order; a section is dealt evenly, earlier lots taking the extra entry.
@@ -78,12 +80,14 @@ pub fn strip(sections: &[Section]) -> Vec<Lot> {
             let mut entries = section.entries[from..from + size].to_vec();
             entries.sort_by_key(|(_, rank)| *rank);
             from += size;
-            let (heading, seats) = cut(size, mirrors(&section.key, part));
+            let mirrors = mirrors(&section.key, part);
+            let (heading, seats) = cut(size, mirrors);
             lots.push(Lot {
                 heading_tile: section.heading,
                 heading,
                 tiles: entries.into_iter().map(|(tile, _)| tile).collect(),
                 seats,
+                mirrors,
             });
         }
     }
@@ -156,4 +160,74 @@ fn cut(count: usize, mirrors: u32) -> (Seat, Vec<Seat>) {
         .collect();
     seats.sort_by(|a, b| (b.2 * b.3).cmp(&(a.2 * a.3)).then(a.1.cmp(&b.1)).then(a.0.cmp(&b.0)));
     (HEADING_STRIP, seats)
+}
+
+/// `grownStripSeatsOf`: strip seats for the tiles left beside a grown one.
+fn grown_strip_seats(others: usize) -> usize {
+    3.min((others.saturating_sub(9)).max(if others > 2 { 2 } else { 1 }))
+}
+
+/// `cutGrownLot`: the seats while the tile on `grown` takes a 6x6 square; the others move the least they can.
+pub fn cut_grown(lot: &Lot, grown: usize) -> Vec<Seat> {
+    let count = lot.seats.len();
+    let base = &lot.seats;
+    let Some(&target) = base.get(grown) else { return base.clone() };
+    if count <= 2 {
+        return (0..count).map(|seat| if seat == grown { RIGHT_SQUARE } else { RIGHT_STRIP }).collect();
+    }
+    let in_left = target.0 * 2 + target.2 < (LEFT_SQUARE.0 + LEFT_SQUARE.2) * 2;
+    let others = count - 1;
+    let strip = grown_strip_seats(others);
+    let (square, mirror) =
+        if in_left { (RIGHT_SQUARE, (lot.mirrors >> 2) & 3) } else { (LEFT_SQUARE, lot.mirrors & 3) };
+    let free: Vec<Seat> = seats_in(square, SQUARE_SEATS[(others - strip).min(9)], mirror)
+        .chain(seats_in(RIGHT_STRIP, STRIP_SEATS[strip], 0))
+        .collect();
+    let movers: Vec<usize> = (0..count).filter(|seat| *seat != grown).collect();
+    let taken = least_travel(&movers.iter().map(|seat| base[*seat]).collect::<Vec<_>>(), &free);
+    let mut result = base.clone();
+    result[grown] = if in_left { LEFT_SQUARE } else { RIGHT_SQUARE };
+    for (index, seat) in movers.iter().enumerate() {
+        if let Some(place) = taken.get(index).and_then(|place| free.get(*place)) {
+            result[*seat] = *place;
+        }
+    }
+    result
+}
+
+/// `seatWithLeastTravel`: the assignment of tiles to seats with the least summed squared travel of the centres.
+fn least_travel(from: &[Seat], to: &[Seat]) -> Vec<usize> {
+    let count = from.len().min(to.len());
+    let travel = |tile: Seat, seat: Seat| {
+        f64::from(
+            (2 * tile.0 + tile.2 - 2 * seat.0 - seat.2).pow(2) + (2 * tile.1 + tile.3 - 2 * seat.1 - seat.3).pow(2),
+        )
+    };
+    let states = 1usize << count;
+    let mut best = vec![f64::INFINITY; states];
+    let mut last = vec![0usize; states];
+    best[0] = 0.0;
+    for mask in 0..states {
+        let tile = mask.count_ones() as usize;
+        if tile >= count {
+            continue;
+        }
+        for seat in 0..count {
+            if mask & (1 << seat) != 0 {
+                continue;
+            }
+            let sum = best[mask] + travel(from[tile], to[seat]);
+            if sum < best[mask | (1 << seat)] {
+                best[mask | (1 << seat)] = sum;
+                last[mask | (1 << seat)] = seat;
+            }
+        }
+    }
+    let mut taken = vec![0; count];
+    let mut mask = states - 1;
+    for tile in (0..count).rev() {
+        taken[tile] = last[mask];
+        mask &= !(1 << last[mask]);
+    }
+    taken
 }

@@ -12,6 +12,7 @@ use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, T
 use iced::{Color, Font, Point, Rectangle, Renderer, Size, Task, Vector, mouse, window};
 
 use crate::background::blocking;
+use crate::focus_card::{self, BlockShape, Focus, SlotId};
 use crate::lots::{self, LOT_COLS, LOT_ROWS, Lot};
 
 const CELL: f32 = 128.0;
@@ -20,6 +21,8 @@ const PITCH: f32 = CELL + GAP;
 const BLOCK_COLS: i32 = 12;
 const BLOCK_ROWS: i32 = 8;
 const SLOTS_PER_BLOCK: usize = 12;
+/// A block's width on the wall (`BLOCK_COLS · pitch − gap`), the span the focus reflow's spring is sampled for.
+pub const BLOCK_WIDTH: f32 = BLOCK_COLS as f32 * PITCH - GAP;
 const RANK_VERTICAL_WEIGHT: f32 = 0.9;
 const RANK_AREA_WEIGHT: f32 = 0.35;
 const DRAG_THRESHOLD: f32 = 4.0;
@@ -157,6 +160,7 @@ enum Layout {
 struct Placement {
     rect: Rectangle,
     track: usize,
+    slot: SlotId,
 }
 
 /// A tile's text fitted to its width at the current scale: the title clamped to three lines, the artist to one.
@@ -202,7 +206,8 @@ pub enum Message {
         velocity: Vector,
         stale: bool,
     },
-    Play(usize),
+    /// A click on a tile (`activate`), or on the wall where no tile is.
+    Press(Option<(usize, SlotId)>),
     CoversLoaded(Vec<(i64, Option<Cover>)>),
 }
 
@@ -225,6 +230,12 @@ pub struct Wall {
     horizontal: bool,
     planned: bool,
     coast: Option<Coast>,
+    /// The focus card and the keyboard focus (`useBravaisFocus`).
+    pub focus: Focus,
+    /// The album wall's mosaic or shards while an album poster is on screen (`has-album-wall`).
+    pub album: Option<crate::album_wall::AlbumWall>,
+    /// The layer turning with a poster on screen.
+    pub tilt: crate::poster_motion::Tilt,
 }
 
 /// Release coast from `wallPanMotion`: amplitude `0.3 × speed`, time constant 280ms.
@@ -253,6 +264,9 @@ impl Wall {
             horizontal: false,
             planned: false,
             coast: None,
+            focus: Focus::default(),
+            album: None,
+            tilt: crate::poster_motion::Tilt::new(Instant::now()),
         }
     }
 
@@ -280,7 +294,9 @@ impl Wall {
                             }
                             let distance = rect.center().distance(Point::new(self.pan.x, self.pan.y));
                             if best.is_none_or(|(near, _)| distance < near) {
-                                best = Some((distance, Placement { rect, track: index }));
+                                let slot =
+                                    SlotId { column: i64::from(column), row: i64::from(row), index: slot, lot: false };
+                                best = Some((distance, Placement { rect, track: index, slot }));
                             }
                         }
                     }
@@ -295,6 +311,7 @@ impl Wall {
 
     /// Lays out `tiles` around the wall's origin and fetches what lands on screen.
     pub fn relayout(&mut self, tiles: &[Tile], shape: Shape, omni: Option<&Omni>) -> Task<Message> {
+        self.focus.reset();
         self.layout = match shape {
             Shape::Blocks => {
                 let count = tiles.len();
@@ -333,7 +350,12 @@ impl Wall {
         }
     }
 
-    pub fn update(&mut self, message: Message, tiles: &[Tile], omni: Option<&Omni>) -> (Task<Message>, Option<usize>) {
+    pub fn update(
+        &mut self,
+        message: Message,
+        tiles: &[Tile],
+        omni: Option<&Omni>,
+    ) -> (Task<Message>, Option<Option<(usize, SlotId)>>) {
         match message {
             Message::Viewport(size) => {
                 self.viewport = size;
@@ -346,6 +368,7 @@ impl Wall {
                 (self.show_visible(tiles, omni), None)
             }
             Message::Pan(delta) => {
+                self.focus.stop_camera();
                 self.pan_by(delta);
                 (self.show_visible(tiles, omni), None)
             }
@@ -353,7 +376,7 @@ impl Wall {
                 self.release(velocity, stale);
                 (self.show_visible(tiles, omni), None)
             }
-            Message::Play(index) => (Task::none(), Some(index)),
+            Message::Press(hit) => (Task::none(), Some(hit)),
             Message::CoversLoaded(covers) => {
                 for (id, cover) in covers {
                     self.pending.remove(&id);
@@ -376,14 +399,22 @@ impl Wall {
     /// Typesets the labels of tiles on screen that have none yet; measuring text is too slow to do every frame.
     fn fit_visible(&mut self, tiles: &[Tile]) {
         let Some(typeset) = self.typeset else { return };
-        for index in 0..self.shown.len() {
-            let placement = self.shown[index];
-            let key = (placement.track, placement.rect.width as u32);
+        for index in 0..self.shown.len() * 2 {
+            let placement = self.shown[index / 2];
+            // Each tile at rest, and where the focus card's reflow takes it.
+            let width = match index % 2 {
+                0 => placement.rect.width,
+                _ => match self.focus.target(placement.slot) {
+                    Some(target) => target.width,
+                    None => continue,
+                },
+            };
+            let key = (placement.track, width as u32);
             if self.labels.contains_key(&key) {
                 continue;
             }
             let Some(tile) = tiles.get(placement.track) else { continue };
-            let width = placement.rect.width * typeset.scale - 34.0 * typeset.scale;
+            let width = width * typeset.scale - 34.0 * typeset.scale;
             let badge = tile.badge.as_ref().map(|text| {
                 let size = folia_visualizer::measure(text, typeset.badge, BADGE_FONT, f32::INFINITY);
                 (text.clone(), Size::new(size.width + 16.0 * typeset.scale, typeset.badge_box.height))
@@ -475,16 +506,24 @@ impl Wall {
                     let (block_w, block_h) = (BLOCK_COLS as f32 * PITCH, BLOCK_ROWS as f32 * PITCH);
                     for row in (low.y / block_h).floor() as i32..=(high.y / block_h).floor() as i32 {
                         for column in (low.x / block_w).floor() as i32..=(high.x / block_w).floor() as i32 {
-                            for (slot, rect) in block_rects(column, row).into_iter().enumerate() {
-                                if let Some(track) = wrap_item(column, row, slot, count, offset, columns, rows) {
-                                    shown.push(Placement { rect, track });
+                            for (index, rect) in block_rects(column, row).into_iter().enumerate() {
+                                if let Some(track) = wrap_item(column, row, index, count, offset, columns, rows) {
+                                    let slot =
+                                        SlotId { column: i64::from(column), row: i64::from(row), index, lot: false };
+                                    shown.push(Placement { rect, track, slot });
                                 }
                             }
                         }
                     }
                 }
             }
-            shown.retain(|placement| self.screen(placement.rect).intersects(&screen));
+            let now = Instant::now();
+            shown.retain(|placement| {
+                self.screen(placement.rect).intersects(&screen)
+                    || self.focus.involves(placement.slot) && {
+                        self.screen(self.focus.rect(placement.slot, placement.rect, now)).intersects(&screen)
+                    }
+            });
         }
         self.shown = shown;
     }
@@ -617,8 +656,9 @@ impl Wall {
         theme: &'a Theme,
         daylight: bool,
         playing: Option<i64>,
+        band: Option<crate::poster::Band<'a>>,
     ) -> WallProgram<'a> {
-        WallProgram { wall: self, tracks, theme, daylight, playing }
+        WallProgram { wall: self, tracks, theme, daylight, playing, band }
     }
 }
 
@@ -632,8 +672,13 @@ fn explore_lot(lots: &[Lot], column: i64, row: i64, into: &mut Vec<Placement>) {
         width: cols as f32 * PITCH - GAP,
         height: rows as f32 * PITCH - GAP,
     };
-    into.push(Placement { rect: rect(lot.heading), track: lot.heading_tile });
-    into.extend(lot.tiles.iter().zip(&lot.seats).map(|(&track, &seat)| Placement { rect: rect(seat), track }));
+    let slot = |index: usize| SlotId { column, row, index, lot: true };
+    into.push(Placement { rect: rect(lot.heading), track: lot.heading_tile, slot: slot(lot.seats.len()) });
+    into.extend(lot.tiles.iter().zip(&lot.seats).enumerate().map(|(index, (&track, &seat))| Placement {
+        rect: rect(seat),
+        track,
+        slot: slot(index),
+    }));
 }
 
 /// `resolveCoverSizeStep`: the smallest step covering `px`, the largest past it.
@@ -694,6 +739,8 @@ pub struct WallProgram<'a> {
     theme: &'a Theme,
     daylight: bool,
     playing: Option<i64>,
+    /// The poster's ground, drawn into the tilted seam with the walls while the layer turns.
+    band: Option<crate::poster::Band<'a>>,
 }
 
 #[derive(Default)]
@@ -756,9 +803,23 @@ impl canvas::Program<Message> for WallProgram<'_> {
                     return Some(Action::publish(Message::Settled { velocity, stale }));
                 }
 
-                let hit = self.wall.shown.iter().rev().find(|p| self.wall.screen(p.rect).contains(from))?;
+                // The grown card is on top, then the focused tile, then the rest in drawing order; a tilted layer is
+                // turned back first.
+                let now = Instant::now();
+                let from = self.wall.untilt(from, now);
+                let expanded = self.wall.focus.expanded().map(|(slot, _)| slot);
+                let keyboard = self.wall.focus.keyboard();
+                let hit = self
+                    .wall
+                    .shown
+                    .iter()
+                    .filter(|p| Some(p.slot) == expanded)
+                    .chain(self.wall.shown.iter().filter(|p| Some(p.slot) == keyboard && Some(p.slot) != expanded))
+                    .chain(self.wall.shown.iter().rev())
+                    .find(|p| self.wall.drawn(p, now).contains(from));
+                let Some(hit) = hit else { return Some(Action::publish(Message::Press(None))) };
                 let tile = self.tracks.get(hit.track)?;
-                (!tile.heading).then(|| Action::publish(Message::Play(hit.track)))
+                (!tile.heading).then(|| Action::publish(Message::Press(Some((hit.track, hit.slot)))))
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 cursor.position_in(bounds)?;
@@ -783,19 +844,64 @@ impl canvas::Program<Message> for WallProgram<'_> {
         let mut frame = Frame::new(renderer, bounds.size());
         let Some(typeset) = self.wall.typeset else { return vec![frame.into_geometry()] };
         let palette = Palette::new(self.theme, self.daylight);
-        for placement in &self.wall.shown {
+        let now = Instant::now();
+        // `withTilt`: both halves and the seam turn about the poster's right edge at half the window's height.
+        let deg = self.wall.tilt.deg(now);
+        if deg.abs() > 0.001 {
+            let pivot = self.wall.pivot();
+            frame.translate(Vector::new(pivot.x, pivot.y));
+            frame.rotate(deg.to_radians());
+            frame.translate(Vector::new(-pivot.x, -pivot.y));
+            if let Some(band) = self.band {
+                self.wall.draw_band(&mut frame, band);
+            }
+        }
+        let expanded = self.wall.focus.expanded().map(|(slot, _)| slot);
+        let keyboard = self.wall.focus.keyboard();
+        let raised = |placement: &&Placement| Some(placement.slot) == expanded || Some(placement.slot) == keyboard;
+        // `z-index`: the rest, then the keyboard focus (4), then the grown card (20).
+        let order = self
+            .wall
+            .shown
+            .iter()
+            .filter(|placement| !raised(placement))
+            .chain(self.wall.shown.iter().filter(|p| Some(p.slot) == keyboard && Some(p.slot) != expanded))
+            .chain(self.wall.shown.iter().filter(|p| Some(p.slot) == expanded));
+        for placement in order {
             let Some(item) = self.tracks.get(placement.track) else { continue };
+            let rect = self.wall.drawn(placement, now);
+            let world_width = self.wall.focus.rect(placement.slot, placement.rect, now).width;
+            let label = [
+                world_width,
+                self.wall.focus.target(placement.slot).map_or(placement.rect.width, |t| t.width),
+                placement.rect.width,
+            ]
+            .into_iter()
+            .find_map(|width| self.wall.labels.get(&(placement.track, width as u32)));
+            let grown = Some(placement.slot) == expanded;
+            let art = if grown || item.heading {
+                Art::None
+            } else {
+                self.wall.art(placement, item, rect, Some(placement.slot) == keyboard || self.playing == Some(item.id))
+            };
             let tile = Drawn {
-                rect: self.wall.screen(placement.rect),
+                rect,
                 index: placement.track,
                 cover: self.wall.covers.peek(&item.id).and_then(Option::as_ref),
-                label: self.wall.labels.get(&(placement.track, placement.rect.width as u32)),
+                art,
+                label: if grown { None } else { label },
                 current: self.playing == Some(item.id),
                 heading: item.heading,
                 hue: item.hue,
                 stack: item.stack,
             };
             draw_tile(&mut frame, &tile, &typeset, &palette);
+            if grown {
+                draw_grown_shade(&mut frame, rect, &palette);
+            }
+            if Some(placement.slot) == keyboard {
+                draw_focus(&mut frame, rect, tile.current, self.daylight, &palette);
+            }
         }
         vec![frame.into_geometry()]
     }
@@ -838,11 +944,19 @@ struct Drawn<'a> {
     rect: Rectangle,
     index: usize,
     cover: Option<&'a Handle>,
+    art: Art<'a>,
     label: Option<&'a Label>,
     current: bool,
     heading: bool,
     hue: f32,
     stack: bool,
+}
+
+/// The album wall's art in a tile's place: its share of the block's cover, or a zoomed duotone shard with dots.
+enum Art<'a> {
+    None,
+    Mosaic { image: &'a Handle, square: Rectangle },
+    Shard { image: &'a Handle, rect: Rectangle, dots: Option<&'a Handle> },
 }
 
 // Everything is drawn in window coordinates: iced's `with_clip` does not move images and text into the clip.
@@ -851,15 +965,14 @@ fn draw_tile(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Palet
     if tile.stack {
         // `has-stack-edges`: pages 6px and 3px down-right, each with a 1px line round it, under the poster.
         for (offset, page) in [(6.0, palette.page_far), (3.0, palette.page_near)] {
-            frame.fill_rectangle(
-                Point::new(x + offset - 1.0, y + offset - 1.0),
-                Size::new(width + 2.0, height + 2.0),
+            frame.fill(
+                &Path::rectangle(Point::new(x + offset - 1.0, y + offset - 1.0), Size::new(width + 2.0, height + 2.0)),
                 palette.page_line,
             );
-            frame.fill_rectangle(Point::new(x + offset, y + offset), tile.rect.size(), page);
+            frame.fill(&Path::rectangle(Point::new(x + offset, y + offset), tile.rect.size()), page);
         }
     }
-    frame.fill_rectangle(tile.rect.position(), tile.rect.size(), palette.poster);
+    frame.fill(&Path::rectangle(tile.rect.position(), tile.rect.size()), palette.poster);
     if tile.heading {
         draw_badge(frame, tile, typeset, palette);
         if let Some(label) = tile.label {
@@ -870,21 +983,60 @@ fn draw_tile(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Palet
     let fallback = gradient::Linear::new(Point::new(x, y), Point::new(x + width, y + height))
         .add_stop(0.0, hsl(tile.hue, 0.68, 0.58))
         .add_stop(1.0, hsl((tile.hue + 52.0) % 360.0, 0.62, 0.18));
-    frame.fill_rectangle(tile.rect.position(), tile.rect.size(), fallback);
-    if let Some(handle) = tile.cover {
-        // `background-size: cover` of a square cover: drawn over the longer side, clipped to the slot.
-        let side = width.max(height);
-        let square = Rectangle { x: x + (width - side) / 2.0, y: y + (height - side) / 2.0, width: side, height: side };
-        frame.with_clip(tile.rect, |clipped| clipped.draw_image(square, canvas::Image::new(handle.clone())));
+    frame.fill(&Path::rectangle(tile.rect.position(), tile.rect.size()), fallback);
+    let mosaic = matches!(tile.art, Art::Mosaic { .. });
+    match tile.art {
+        Art::Mosaic { image, square } => {
+            frame.with_clip(tile.rect, |clipped| clipped.draw_image(square, canvas::Image::new(image.clone())));
+        }
+        Art::Shard { image, rect, dots } => {
+            frame.with_clip(tile.rect, |clipped| {
+                clipped.draw_image(rect, canvas::Image::new(image.clone()));
+                if let Some(dots) = dots {
+                    let side = crate::album_wall::DOTS_SIDE as f32;
+                    let mut row = y;
+                    while row < y + height {
+                        let mut column = x;
+                        while column < x + width {
+                            let cell = Rectangle::new(Point::new(column, row), Size::new(side, side));
+                            clipped.draw_image(cell, canvas::Image::new(dots.clone()));
+                            column += side;
+                        }
+                        row += side;
+                    }
+                }
+            });
+        }
+        Art::None => {
+            if let Some(handle) = tile.cover {
+                // `background-size: cover` of a square cover: drawn over the longer side, clipped to the slot.
+                let side = width.max(height);
+                let square =
+                    Rectangle { x: x + (width - side) / 2.0, y: y + (height - side) / 2.0, width: side, height: side };
+                frame.with_clip(tile.rect, |clipped| clipped.draw_image(square, canvas::Image::new(handle.clone())));
+            }
+        }
     }
-    let fade = gradient::Linear::new(Point::new(x, y), Point::new(x, y + height))
-        .add_stop(0.0, palette.shade(0.05))
-        .add_stop(0.34, palette.shade(0.05))
-        .add_stop(0.56, palette.shade(0.24))
-        .add_stop(1.0, palette.shade(0.92));
-    frame.fill_rectangle(tile.rect.position(), tile.rect.size(), fade);
+    // A mosaic tile keeps only a light shade at its foot, so the pieces read as one cover; its copy stands on a shadow.
+    let fade = if mosaic {
+        gradient::Linear::new(Point::new(x, y), Point::new(x, y + height))
+            .add_stop(0.55, palette.shade(0.0))
+            .add_stop(0.74, palette.shade(0.12))
+            .add_stop(1.0, palette.shade(0.40))
+    } else {
+        gradient::Linear::new(Point::new(x, y), Point::new(x, y + height))
+            .add_stop(0.0, palette.shade(0.05))
+            .add_stop(0.34, palette.shade(0.05))
+            .add_stop(0.56, palette.shade(0.24))
+            .add_stop(1.0, palette.shade(0.92))
+    };
+    frame.fill(&Path::rectangle(tile.rect.position(), tile.rect.size()), fade);
     draw_badge(frame, tile, typeset, palette);
     if let Some(label) = tile.label {
+        if mosaic {
+            let below = Rectangle { y: tile.rect.y + 1.0, ..tile.rect };
+            draw_copy(frame, below, label, typeset, palette.shade(0.6));
+        }
         draw_copy(frame, tile.rect, label, typeset, palette.ink);
     }
     if tile.current {
@@ -901,7 +1053,7 @@ fn draw_badge(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Pale
     let origin = Point::new(tile.rect.x + inset, tile.rect.y + inset);
     let word = tile.label.and_then(|label| label.badge.as_ref());
     let size = word.map_or(typeset.badge_box, |(_, size)| *size);
-    frame.fill_rectangle(origin, size, palette.shade(if tile.current { 0.78 } else { 0.62 }));
+    frame.fill(&Path::rectangle(origin, size), palette.shade(if tile.current { 0.78 } else { 0.62 }));
     frame.fill_text(Text {
         content: word.map_or_else(|| format!("{:02}", tile.index + 1), |(text, _)| text.clone()),
         position: Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0),
@@ -997,10 +1149,10 @@ fn place(count: usize) -> Vec<Placement> {
     while ((radius * 2 + 1) * (radius * 2 + 1)) as usize * SLOTS_PER_BLOCK < count * 2 {
         radius += 1;
     }
-    let mut slots: Vec<(f32, Rectangle)> = Vec::new();
+    let mut slots: Vec<(f32, Rectangle, SlotId)> = Vec::new();
     for row in -radius..=radius {
         for column in -radius..=radius {
-            for (x, y, cols, rows) in block(column, row) {
+            for (index, (x, y, cols, rows)) in block(column, row).into_iter().enumerate() {
                 let rect = Rectangle {
                     x: (column * BLOCK_COLS + x) as f32 * PITCH,
                     y: (row * BLOCK_ROWS + y) as f32 * PITCH,
@@ -1010,19 +1162,27 @@ fn place(count: usize) -> Vec<Placement> {
                 let center = rect.center();
                 let score = center.x.abs() + center.y.abs() * RANK_VERTICAL_WEIGHT
                     - ((cols * rows) as f32).sqrt() * PITCH * RANK_AREA_WEIGHT;
-                slots.push((score, rect));
+                slots.push((score, rect, SlotId { column: i64::from(column), row: i64::from(row), index, lot: false }));
             }
         }
     }
     slots.sort_by(|a, b| a.0.total_cmp(&b.0));
-    slots.into_iter().take(count).enumerate().map(|(track, (_, rect))| Placement { rect, track }).collect()
+    slots.into_iter().take(count).enumerate().map(|(track, (_, rect, slot))| Placement { rect, track, slot }).collect()
 }
 
 /// The block's template, picked and mirrored as the original `getBlockOrientation` does.
 fn block(column: i32, row: i32) -> [(i32, i32, i32, i32); SLOTS_PER_BLOCK] {
-    let template = TEMPLATES[(column + row * 2).rem_euclid(TEMPLATES.len() as i32) as usize];
-    let reflection = mix(column, row) % 4;
-    template.map(|(x, y, cols, rows)| {
+    let (template, reflection) = orientation(column, row);
+    reflect(TEMPLATES[template], reflection)
+}
+
+/// `getBlockOrientation`: the template steps +1 across and +2 down; the reflection comes from a hash.
+fn orientation(column: i32, row: i32) -> (usize, u32) {
+    ((column + row * 2).rem_euclid(TEMPLATES.len() as i32) as usize, mix(column, row) % 4)
+}
+
+fn reflect(cells: [(i32, i32, i32, i32); SLOTS_PER_BLOCK], reflection: u32) -> [(i32, i32, i32, i32); SLOTS_PER_BLOCK] {
+    cells.map(|(x, y, cols, rows)| {
         let x = if reflection & 1 == 1 { BLOCK_COLS - x - cols } else { x };
         let y = if reflection & 2 == 2 { BLOCK_ROWS - y - rows } else { y };
         (x, y, cols, rows)
@@ -1137,4 +1297,390 @@ fn js_round(value: f32) -> i32 {
 /// `getSeamSplitOffsets`: how far the halves of the wall move apart, on screen, for an opening this wide.
 fn seam_push(width: f32, scale: f32) -> f32 {
     width / 2.0 + GAP / 2.0 * scale * (width / 16.0).min(1.0)
+}
+
+// Focus card wiring: the geometry the focus card asks of the wall, and the camera it moves.
+impl Wall {
+    /// A slot's block at rest and with it grown (`grownBlock`): the block template's reflow, or the lot's cut.
+    fn block_shape(&self, slot: SlotId) -> Option<BlockShape> {
+        if slot.lot {
+            let Layout::Explore(lots) = &self.layout else { return None };
+            let lot = lots.get(lots::lot_at(slot.column, slot.row, lots.len()))?;
+            if slot.index >= lot.seats.len() {
+                return None;
+            }
+            let origin = Point::new(slot.column as f32 * LOT_PITCH_X, slot.row as f32 * LOT_PITCH_Y);
+            let rect = |(x, y, cols, rows): lots::Seat| Rectangle {
+                x: origin.x + x as f32 * PITCH,
+                y: origin.y + y as f32 * PITCH,
+                width: cols as f32 * PITCH - GAP,
+                height: rows as f32 * PITCH - GAP,
+            };
+            let mut base: Vec<Rectangle> = lot.seats.iter().copied().map(rect).collect();
+            let mut grown: Vec<Rectangle> = lots::cut_grown(lot, slot.index).into_iter().map(rect).collect();
+            // The heading keeps its seat.
+            base.push(rect(lot.heading));
+            grown.push(rect(lot.heading));
+            return Some(BlockShape { base, grown });
+        }
+        if slot.index >= SLOTS_PER_BLOCK {
+            return None;
+        }
+        let (column, row) = (i32::try_from(slot.column).ok()?, i32::try_from(slot.row).ok()?);
+        let (template, reflection) = orientation(column, row);
+        let to_rect = |(x, y, cols, rows): (i32, i32, i32, i32)| Rectangle {
+            x: (column * BLOCK_COLS + x) as f32 * PITCH,
+            y: (row * BLOCK_ROWS + y) as f32 * PITCH,
+            width: cols as f32 * PITCH - GAP,
+            height: rows as f32 * PITCH - GAP,
+        };
+        let base = block(column, row).map(to_rect).to_vec();
+        let grown =
+            reflect(crate::block_reflows::BLOCK_REFLOWS[template][slot.index], reflection).map(to_rect).to_vec();
+        Some(BlockShape { base, grown })
+    }
+
+    /// `expand`: grows the slot's tile and moves the camera the least that shows the grown card.
+    pub fn expand(&mut self, slot: SlotId, tile: usize, bottom_inset: f32) {
+        let Some(shape) = self.block_shape(slot) else { return };
+        let now = Instant::now();
+        let previous = self.focus.expanded().and_then(|(old, _)| self.block_shape(old));
+        let target = shape.grown.get(slot.index).copied();
+        self.focus.expand(slot, tile, shape, previous, now);
+        if let Some(rect) = target {
+            self.reveal(rect, bottom_inset, now);
+        }
+        self.refresh();
+    }
+
+    /// `collapse`.
+    pub fn collapse(&mut self) {
+        let Some((slot, _)) = self.focus.expanded() else { return };
+        let base = self.block_shape(slot).map(|shape| shape.base).unwrap_or_default();
+        self.focus.collapse(base, Instant::now());
+        self.refresh();
+    }
+
+    /// `focusSlot`: moves the keyboard focus, revealing where the slot is drawn when asked.
+    pub fn focus_slot(&mut self, slot: Option<SlotId>, reveal: bool, bottom_inset: f32) {
+        let now = Instant::now();
+        self.focus.set_keyboard(slot, now);
+        if let (true, Some(slot)) = (reveal, slot)
+            && let Some(rest) = self.rest_rect(slot)
+        {
+            let rect = self.focus.rect(slot, rest, now);
+            self.reveal(rect, bottom_inset, now);
+        }
+    }
+
+    fn reveal(&mut self, rect: Rectangle, bottom_inset: f32, now: Instant) {
+        if self.viewport.width < 1.0 {
+            return;
+        }
+        let scale = wall_scale(self.viewport.width);
+        let seam = self.seam().width;
+        let view = focus_card::View {
+            center: self.pan,
+            size: self.viewport,
+            scale,
+            anchor: if self.horizontal { self.anchor_y } else { self.anchor_x },
+            seam_width: seam,
+            push: seam_push(seam, scale),
+            horizontal: self.horizontal,
+            seam_edge: SEAM_EDGE,
+            bottom_inset: bottom_inset.max(focus_card::REVEAL_PAD),
+        };
+        let deg = self.tilt.deg(now);
+        let target = if deg.abs() > 0.001 && !self.horizontal {
+            self.reveal_tilted(rect, view.bottom_inset, deg)
+        } else {
+            focus_card::reveal(rect, view)
+        };
+        self.focus.tween_to(self.pan, target, now);
+    }
+
+    /// Where a shown slot rests on the wall.
+    fn rest_rect(&self, slot: SlotId) -> Option<Rectangle> {
+        let finite: &[Placement] = match &self.layout {
+            Layout::Finite(placements) => placements,
+            _ => &[],
+        };
+        self.shown.iter().chain(finite).find(|placement| placement.slot == slot).map(|placement| placement.rect)
+    }
+
+    /// One frame of the focus card: the camera tween moves the wall; finished folds are dropped.
+    pub fn tick_focus(&mut self, now: Instant) -> bool {
+        let moved = self.focus.camera(now);
+        if let Some(pan) = moved {
+            self.pan = pan;
+        }
+        self.focus.settle(now);
+        self.refresh();
+        moved.is_some()
+    }
+
+    /// The tile and slot under keyboard focus, or the seed: the shown slot nearest the middle of the window.
+    pub fn keyboard_tile(&self) -> Option<(usize, SlotId)> {
+        let slot = self.focus.keyboard()?;
+        self.shown.iter().find(|placement| placement.slot == slot).map(|placement| (placement.track, slot))
+    }
+
+    /// `move` on the wall: the adjacent shown slot holding a tile, or the slot nearest the window's middle.
+    pub fn neighbour(&self, direction: focus_card::Direction, tiles: &[Tile]) -> Option<SlotId> {
+        let now = Instant::now();
+        let filled = |placement: &&Placement| tiles.get(placement.track).is_some_and(|tile| !tile.heading);
+        let drawn = |placement: &Placement| self.focus.rect(placement.slot, placement.rect, now);
+        match self.focus.keyboard().and_then(|slot| self.shown.iter().find(|placement| placement.slot == slot)) {
+            Some(from) => focus_card::adjacent(
+                drawn(from),
+                direction,
+                self.shown
+                    .iter()
+                    .filter(filled)
+                    .filter(|placement| placement.slot != from.slot)
+                    .map(|placement| (placement.slot, drawn(placement))),
+            ),
+            None => self
+                .shown
+                .iter()
+                .filter(filled)
+                .min_by(|a, b| {
+                    let center = Point::new(self.pan.x, self.pan.y);
+                    a.rect.center().distance(center).total_cmp(&b.rect.center().distance(center))
+                })
+                .map(|placement| placement.slot),
+        }
+    }
+
+    /// The grown card on screen, for the card's body drawn over the wall.
+    pub fn expanded_screen(&self, now: Instant) -> Option<(usize, Rectangle, f32)> {
+        let (slot, tile) = self.focus.expanded()?;
+        let rest = self.rest_rect(slot)?;
+        Some((tile, self.screen(self.focus.rect(slot, rest, now)), wall_scale(self.viewport.width)))
+    }
+
+    /// Where a shown slot's tile is drawn on screen now.
+    pub fn slot_screen(&self, slot: SlotId) -> Option<Rectangle> {
+        let placement = self.shown.iter().find(|placement| placement.slot == slot)?;
+        Some(self.drawn(placement, Instant::now()))
+    }
+
+    /// A tile's cover once it has arrived.
+    pub fn cover(&self, id: i64) -> Option<Handle> {
+        self.covers.peek(&id).and_then(Option::as_ref).cloned()
+    }
+
+    /// `page`: 85% of the window up or down.
+    pub fn page(&mut self, direction: i8) {
+        if self.viewport.width < 1.0 {
+            return;
+        }
+        let scale = wall_scale(self.viewport.width);
+        let target = Vector::new(self.pan.x, self.pan.y + f32::from(direction) * self.viewport.height * 0.85 / scale);
+        self.focus.tween_to(self.pan, target, Instant::now());
+    }
+
+    /// A drawn tile's rect on screen: moved with its block, popped by keyboard focus.
+    fn drawn(&self, placement: &Placement, now: Instant) -> Rectangle {
+        let rect = self.screen(self.focus.rect(placement.slot, placement.rect, now));
+        let pop = self.focus.pop(placement.slot, now);
+        if pop > 0.0 && self.focus.expanded().is_none_or(|(slot, _)| slot != placement.slot) {
+            focus_card::popped(rect, GAP * wall_scale(self.viewport.width), pop)
+        } else {
+            rect
+        }
+    }
+}
+
+/// `.is-expanded .lattice-poster-shade`: a band up from the bottom and one in from the left, over the card's own shade.
+fn draw_grown_shade(frame: &mut Frame, rect: Rectangle, palette: &Palette) {
+    let Rectangle { x, y, width, height } = rect;
+    let mut up = gradient::Linear::new(Point::new(x, y + height), Point::new(x, y));
+    for (at, alpha) in focus_card::EXPANDED_SHADE {
+        up = up.add_stop(at, palette.shade(alpha));
+    }
+    frame.fill(&Path::rectangle(rect.position(), rect.size()), up);
+    let mut across = gradient::Linear::new(Point::new(x, y), Point::new(x + width, y));
+    for (at, alpha) in focus_card::EXPANDED_SIDE {
+        across = across.add_stop(at, palette.shade(alpha));
+    }
+    frame.fill(&Path::rectangle(rect.position(), rect.size()), across);
+}
+
+/// Keyboard focus: the top highlight (`::after`, white 10% to nothing at 60%) and, on a tile without the playing
+/// stroke, the ring of hairline, ink and hairline outside it.
+fn draw_focus(frame: &mut Frame, rect: Rectangle, current: bool, daylight: bool, palette: &Palette) {
+    let Rectangle { x, y, height, .. } = rect;
+    let glow = gradient::Linear::new(Point::new(x, y), Point::new(x, y + height))
+        .add_stop(0.0, Color::from_rgba(1.0, 1.0, 1.0, 0.1))
+        .add_stop(0.6, Color::TRANSPARENT);
+    frame.fill(&Path::rectangle(rect.position(), rect.size()), glow);
+    if current {
+        return;
+    }
+    let mut inner = 0.0;
+    for (outer, color) in focus_card::ring(daylight, palette.ink) {
+        let middle = (inner + outer) / 2.0;
+        let band = Rectangle {
+            x: x - middle,
+            y: y - middle,
+            width: rect.width + 2.0 * middle,
+            height: rect.height + 2.0 * middle,
+        };
+        frame.stroke(
+            &Path::rectangle(band.position(), band.size()),
+            Stroke::default().with_width(outer - inner).with_color(color),
+        );
+        inner = outer;
+    }
+}
+
+impl Wall {
+    /// How many tiles a finite (filtered) wall holds; an endless wall has no last tile.
+    pub fn finite_count(&self) -> Option<usize> {
+        match &self.layout {
+            Layout::Finite(placements) => Some(placements.len()),
+            _ => None,
+        }
+    }
+
+    /// The slot showing tile `index` nearest the camera.
+    pub fn slot_of(&self, index: usize) -> Option<SlotId> {
+        let near = Point::new(self.pan.x, self.pan.y);
+        let candidates: &[Placement] = match &self.layout {
+            Layout::Finite(placements) => placements,
+            _ => &self.shown,
+        };
+        candidates
+            .iter()
+            .filter(|placement| placement.track == index)
+            .min_by(|a, b| a.rect.center().distance(near).total_cmp(&b.rect.center().distance(near)))
+            .map(|placement| placement.slot)
+    }
+}
+
+impl Wall {
+    /// The album wall's art for a drawn tile: the mosaic, or a shard unless the tile is focused or playing.
+    fn art<'a>(&'a self, placement: &Placement, item: &Tile, drawn: Rectangle, restored: bool) -> Art<'a> {
+        let Some(album) = self.album.as_ref().filter(|album| album.mosaic_on) else { return Art::None };
+        let scale = wall_scale(self.viewport.width);
+        if let Some(image) = album.mosaic.as_ref().or(album.stand_in.as_ref())
+            && !placement.slot.lot
+        {
+            let block = Size::new(BLOCK_COLS as f32 * PITCH - GAP, BLOCK_ROWS as f32 * PITCH - GAP);
+            let pitch = Size::new(BLOCK_COLS as f32 * PITCH, BLOCK_ROWS as f32 * PITCH);
+            let world = crate::album_wall::mosaic_square(placement.slot.column, placement.slot.row, block, pitch);
+            // The block's cover follows the tile: same offset from the tile on screen as on the wall.
+            let rest = self.focus.rect(placement.slot, placement.rect, Instant::now());
+            let square = Rectangle {
+                x: drawn.x + (world.x - rest.x) * scale,
+                y: drawn.y + (world.y - rest.y) * scale,
+                width: world.width * scale,
+                height: world.height * scale,
+            };
+            return Art::Mosaic { image, square };
+        }
+        match album.shards.get(&item.id).filter(|_| !restored) {
+            Some(shard) => {
+                let place = crate::album_wall::shard_placement(&shard.spots, &shard.seed, drawn.size());
+                let rect = Rectangle { x: drawn.x + place.x, y: drawn.y + place.y, ..place };
+                Art::Shard { image: &shard.duotone, rect, dots: album.dots.as_ref() }
+            }
+            None => Art::None,
+        }
+    }
+}
+
+impl Wall {
+    /// Where the tilt turns about: the poster's right edge, half way down the window.
+    fn pivot(&self) -> Point {
+        let seam = self.seam();
+        Point::new(seam.center + seam.width / 2.0, self.viewport.height / 2.0)
+    }
+
+    /// A point on the window as it stands on the untilted wall.
+    fn untilt(&self, point: Point, now: Instant) -> Point {
+        let deg = self.tilt.deg(now);
+        if deg.abs() <= 0.001 {
+            return point;
+        }
+        let pivot = self.pivot();
+        let (sin, cos) = (-deg.to_radians()).sin_cos();
+        let (dx, dy) = (point.x - pivot.x, point.y - pivot.y);
+        Point::new(pivot.x + dx * cos - dy * sin, pivot.y + dx * sin + dy * cos)
+    }
+
+    /// The seam's poster ground in the turned frame, with the paper running on above it and the block below
+    /// (`--bravais-poster-bleed: 40vh`) so the turned corners stay covered.
+    fn draw_band(&self, frame: &mut Frame, band: crate::poster::Band<'_>) {
+        let seam = self.seam();
+        let height = self.viewport.height;
+        let bleed = height * 0.4;
+        let left = seam.center - seam.width / 2.0;
+        frame.fill(&Path::rectangle(Point::new(left, -bleed), Size::new(seam.width, bleed)), band.palette.paper);
+        frame.fill(&Path::rectangle(Point::new(left, height), Size::new(seam.width, bleed)), band.palette.block);
+        frame.with_save(|frame| {
+            frame.translate(Vector::new(left, 0.0));
+            crate::poster::draw_ground(frame, Size::new(seam.width, height), band);
+        });
+    }
+
+    /// Whether the layer is turned or turning.
+    pub fn tilted(&self, now: Instant) -> bool {
+        self.tilt.deg(now).abs() > 0.001
+    }
+
+    /// `resolvePosterRevealCenter`: with the layer turned, the camera moves until the turned tile's box fits,
+    /// a few rounds since the turn's pivot follows the seam.
+    fn reveal_tilted(&self, rect: Rectangle, bottom_inset: f32, deg: f32) -> Vector {
+        let scale = wall_scale(self.viewport.width);
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let pad = focus_card::REVEAL_PAD;
+        let shift_into = |start: f32, end: f32, low: f32, high: f32| {
+            if end - start > high - low {
+                (low + high) / 2.0 - (start + end) / 2.0
+            } else if start < low {
+                low - start
+            } else if end > high {
+                high - end
+            } else {
+                0.0
+            }
+        };
+        let mut center = self.pan;
+        for _ in 0..8 {
+            let seam = seam_on_axis(
+                self.anchor_x,
+                center.x,
+                self.seam_open,
+                self.viewport.width,
+                self.viewport.width / 2.0,
+                scale,
+                false,
+            );
+            let pivot = Point::new(seam.center + seam.width / 2.0, self.viewport.height / 2.0);
+            let push = seam_push(seam.width, scale);
+            let mut screen = to_screen(rect, center, self.viewport, scale);
+            screen.x += if rect.center_x() < self.anchor_x { -push } else { push };
+            let corners = [
+                Point::new(screen.x, screen.y),
+                Point::new(screen.x + screen.width, screen.y),
+                Point::new(screen.x, screen.y + screen.height),
+                Point::new(screen.x + screen.width, screen.y + screen.height),
+            ]
+            .map(|corner| {
+                let (dx, dy) = (corner.x - pivot.x, corner.y - pivot.y);
+                Point::new(pivot.x + dx * cos - dy * sin, pivot.y + dx * sin + dy * cos)
+            });
+            let (left, right) = corners.iter().fold((f32::MAX, f32::MIN), |(l, r), c| (l.min(c.x), r.max(c.x)));
+            let (top, bottom) = corners.iter().fold((f32::MAX, f32::MIN), |(t, b), c| (t.min(c.y), b.max(c.y)));
+            let shift_x = shift_into(left, right, pad, self.viewport.width - pad);
+            let shift_y = shift_into(top, bottom, pad, self.viewport.height - bottom_inset);
+            if shift_x.abs() < 0.5 && shift_y.abs() < 0.5 {
+                break;
+            }
+            center = Vector::new(center.x - shift_x / scale, center.y - shift_y / (scale * cos.max(0.1)));
+        }
+        center
+    }
 }

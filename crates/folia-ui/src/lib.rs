@@ -1,8 +1,12 @@
 // Top-level UI: pages, navigation and the iced update/view/subscription functions that drive them.
 
+mod album_wall;
 mod background;
+mod block_reflows;
 mod chrome;
+mod cover_flight;
 mod drag_capture;
+mod focus_card;
 mod home;
 mod icons;
 mod library;
@@ -18,6 +22,7 @@ mod playback;
 mod player_bar;
 mod positioner;
 mod poster;
+mod poster_motion;
 mod queue_island;
 mod search;
 mod settings;
@@ -252,6 +257,13 @@ impl Shell {
             index: self.playback.queue.current_index(),
         };
         self.panel.follow(room);
+        // The focus card stays above the player bar's safe area (`getBottomInset`) and knows what is playing.
+        self.library.bottom_inset = if self.playback.current().is_some() {
+            home::seam_safe_bottom(self.bar_offset(), self.home.presence(now))
+        } else {
+            focus_card::REVEAL_PAD
+        };
+        self.library.playing_id = self.playback.current().map(|track| track.id);
         task
     }
 
@@ -486,6 +498,26 @@ impl Shell {
                 tracing::debug!(added, "songs added to the queue");
                 Task::none()
             }
+            Some(library::Effect::Toggle) => {
+                self.playback.update(playback::Message::Toggle, &self.store).map(Message::Playback)
+            }
+            Some(library::Effect::EnterPlayer) => {
+                self.page = Page::NowPlaying;
+                self.reveal_chrome();
+                Task::none()
+            }
+            Some(library::Effect::EnqueueOne(track)) => {
+                // `applyQueueAddBehavior('append')`: a queued song moves to the end.
+                match self.playback.queue.items().iter().position(|queued| queued.id == track.id) {
+                    Some(index) => {
+                        self.playback.update(playback::Message::MoveEnd(index), &self.store).map(Message::Playback)
+                    }
+                    None => {
+                        self.playback.enqueue(vec![track]);
+                        Task::none()
+                    }
+                }
+            }
             Some(library::Effect::SaveTab(tab)) => {
                 self.general.home_tab = tab;
                 save(&self.store, &self.general)
@@ -589,7 +621,16 @@ impl Shell {
         let page: Element<'_, Message> = match self.page {
             Page::Library | Page::Search => {
                 let playing = self.playback.current().map(|track| track.id);
-                self.library.view(&self.i18n, &self.theme, daylight, text_color, muted, playing).map(Message::Library)
+                let queued = self
+                    .library
+                    .expanded_track()
+                    .is_some_and(|track| self.playback.queue.items().iter().any(|queued| queued.id == track.id));
+                let look = library::CardLook {
+                    queued,
+                    playing: self.playback.is_playing(),
+                    window_width: self.window_size.width,
+                };
+                self.library.view(&self.i18n, &self.theme, daylight, muted, playing, look).map(Message::Library)
             }
             Page::NowPlaying => {
                 let lyrics = self.playback.lyrics.as_ref().unwrap_or(&self.empty_lyrics);
@@ -632,7 +673,12 @@ impl Shell {
             stack![page, search]
         } else {
             let shell = home::overlay(&self.home, self.home_host(), now).map(Message::Home);
-            stack![page, shell]
+            let mut layers = stack![page, shell];
+            // The cover flying between the wall and the poster is drawn over both.
+            if let (Page::Library, Some(flight)) = (self.page, self.library.flight_view(now)) {
+                layers = layers.push(flight.map(Message::Library));
+            }
+            layers
         };
         if playing && self.back_hotspot() {
             let back = chrome::round_button(
@@ -809,6 +855,13 @@ impl Shell {
         if self.positioning.is_some() {
             parts.push(iced::event::listen_with(positioner_key));
         }
+        let quiet = self.settings.is_none() && !self.login.is_open() && !self.home_menu_open();
+        if self.page == Page::Library && quiet {
+            parts.push(iced::event::listen_with(wall_key));
+            if self.library.filter_editing() {
+                parts.push(iced::event::listen_with(filter_escape));
+            }
+        }
         if self.login.is_open() {
             parts.push(iced::event::listen_with(login_key));
         }
@@ -912,8 +965,10 @@ impl Shell {
                 &self.i18n,
                 self.playback.current().map(|track| track.id),
                 (self.window_size.height / home::LIST_ROW) as usize,
+                self.window_size,
             ),
             poster_ground: self.library.poster_ground(),
+            poster_tilted: self.library.poster_tilted(),
             list_hover: self.library.layer.as_ref().and_then(|layer| layer.list_hover),
         }
     }
@@ -1094,6 +1149,8 @@ impl Shell {
             home::Message::Query(query) => self.library_message(library::Message::Query(query)),
             home::Message::OpenList => self.library_message(library::Message::OpenList),
             home::Message::OpenFilter => self.library_message(library::Message::OpenFilter),
+            home::Message::PosterCover(rect) => self.library_message(library::Message::PosterCoverAt(rect)),
+            home::Message::FilterSubmit => self.library_message(library::Message::FilterSubmit),
             home::Message::ListScrolled(offset) => self.library_message(library::Message::ListScrolled(offset)),
             home::Message::LocateRow(row) => self.library_message(library::Message::LocateRow(row)),
             home::Message::PlayRow(row) => self.library_message(library::Message::PlayRow(row)),
@@ -1251,6 +1308,31 @@ fn iced_theme(theme: &Theme) -> iced::Theme {
 }
 
 /// Escape closes the sign-in window (Sheet's own Escape).
+/// The wall's keys (`resolveBravaisKey`), unless a control such as the filter took them.
+fn wall_key(event: iced::Event, status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    if status == iced::event::Status::Captured {
+        return None;
+    }
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, repeat, .. }) = event else {
+        return None;
+    };
+    focus_card::key_of(&key, modifiers, repeat).map(|key| Message::Library(library::Message::Key(key)))
+}
+
+/// Esc in the filter, which its input would otherwise keep for losing focus.
+fn filter_escape(event: iced::Event, status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    match event {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            repeat: false,
+            ..
+        }) if status == iced::event::Status::Captured => {
+            Some(Message::Library(library::Message::Key(focus_card::Key::Escape)))
+        }
+        _ => None,
+    }
+}
+
 fn login_key(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
     match event {
         iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
