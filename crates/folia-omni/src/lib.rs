@@ -63,6 +63,14 @@ pub struct AudioSource {
     pub preview: bool,
 }
 
+/// A song's whole file as the platform hands it out, decrypted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioFile {
+    pub bytes: Vec<u8>,
+    /// File extension, such as `ogg`.
+    pub extension: String,
+}
+
 /// One platform the original lists in its sign-in window, with its mark: a letter on a colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Platform {
@@ -213,6 +221,11 @@ pub trait Provider: Send + Sync {
         offset: u32,
     ) -> BoxFuture<'a, Result<Page<Track>, OmniError>>;
     fn audio_source<'a>(&'a self, song: &'a OnlineId) -> BoxFuture<'a, Result<AudioSource, OmniError>>;
+    /// The song's file when the platform hands it out itself (decrypted) instead of at an address; `None` for
+    /// platforms whose `audio_source` is downloaded.
+    fn audio_file<'a>(&'a self, _song: &'a OnlineId) -> Option<BoxFuture<'a, Result<AudioFile, OmniError>>> {
+        None
+    }
     fn lyrics<'a>(&'a self, song: &'a OnlineId) -> BoxFuture<'a, Result<Option<Lyrics>, OmniError>>;
     fn login_code(&self) -> BoxFuture<'_, Result<LoginCode, OmniError>>;
     fn check_login<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<LoginState, OmniError>>;
@@ -370,7 +383,19 @@ impl Omni {
             return Ok(cached);
         }
 
-        let source = self.provider(&song.provider)?.audio_source(song).await?;
+        let provider = self.provider(&song.provider)?;
+        if let Some(file) = provider.audio_file(song) {
+            let AudioFile { bytes, extension } = file.await?;
+            let path = dir.join(format!("{stem}.{extension}"));
+            let io_err = |source| OmniError::Io { path: path.clone(), source };
+            std::fs::create_dir_all(&dir).map_err(io_err)?;
+            let partial = path.with_extension("part");
+            std::fs::write(&partial, &bytes).map_err(io_err)?;
+            std::fs::rename(&partial, &path).map_err(io_err)?;
+            tracing::info!(song = %stem, bytes = bytes.len(), "audio cached from the platform");
+            return Ok(path);
+        }
+        let source = provider.audio_source(song).await?;
         let path = dir.join(format!("{stem}.{}", source.extension));
         let io_err = |source| OmniError::Io { path: path.clone(), source };
         std::fs::create_dir_all(&dir).map_err(io_err)?;
