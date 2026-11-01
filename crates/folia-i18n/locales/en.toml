@@ -134,6 +134,10 @@ seamFold = "Fold"
 seamExpand = "Expand"
 seamRestore = "Expand the info strip"
 seamReopenHere = "Split here"
+playAll = "Play all"
+seamBack = "Back"
+trackCount_one = "{{count}} track"
+trackCount_other = "{{count}} tracks"
 
 [libraryBravaisHome]
 search = "Search"
@@ -141,10 +145,15 @@ searchSubmit = "Search"
 settings = "Settings"
 more = "More"
 backToPlayer = "Back to the player"
+connect = "Connect a streaming service"
 
 [libraryBravaisHome.wallHint]
 localTitle = "No local music imported yet"
 localBody = "Choose “{{action}}” under “⋯” in the info strip, and your folders, albums and artists will fill this wall."
+guestBodyWithLocal = "Choose “{{connect}}” in the info strip to sign in, and your playlists, radio and saved albums will fill this wall. Or import a music folder on the {{local}} tab."
+guestTitle = "No streaming service connected yet"
+reloginBody = "Choose “{{connect}}” in the info strip to sign in again, and your playlists will fill this wall again."
+reloginTitle = "Your {{provider}} sign-in has expired"
 
 [wallTools]
 queue = "Play queue"
@@ -163,6 +172,27 @@ muted = "Muted"
 loading = "Loading..."
 lattice = "Queue collage"
 noResults = "No results found."
+albums = "Albums"
+closeLogin = "Close login"
+dailyRecommendations = "Daily Recommendations"
+dailyRecommendationsDescription = "A daily mix made for you"
+explore = "Explore"
+exploreEmpty = "Nothing to recommend yet"
+exploreFailed = "The recommendations could not be read"
+loadingLibrary = "No content"
+loginNote = "Open Netease Music App > Discover > Scan QR"
+loginSuccess = "Login Successful!"
+loginTitle = "Scan with Netease App"
+loginToProvider = "Log in to {{provider}}"
+neteaseCharts = "Charts"
+neteaseDailyPlaylists = "Daily playlists for you"
+personalFm = "Personal FM"
+playlists = "Playlists"
+providerNotConfigured = "API is not configured for Web"
+qrScanned = "Scanned! Confirm on your phone."
+radio = "Radio"
+retryQr = "Refresh QR code"
+switchOnlineProvider = "Switch online music provider"
 
 [panel]
 cover = "Cover"
@@ -192,6 +222,7 @@ songUnavailableTag = "Unavailable"
 songVideoTag = "MV"
 providerLikeUnavailable = "{{provider}} does not support liking songs."
 providerPlaylistMutationUnavailable = "{{provider}} does not support adding songs to playlists."
+loginExpired = "Login expired. Please sign in again"
 
 [account]
 guestMode = "Guest Mode"
@@ -202,9 +233,43 @@ qualityExhigh = "Very High"
 qualityUltra = "Ultra High"
 qualityLossless = "Lossless"
 qualityHires = "Hi-Res"
+logout = "Logout"
+logoutClearsQueue = "The queue will be cleared."
+logoutConfirmTitle = "Log out of {{provider}}?"
 
 [lyricFile]
 button = "Import / export lyrics"
 
 [lyricProvider]
 netease = "NetEase Cloud Music"
+
+[libraryBravais.kind]
+album = "Album"
+feed = "Radio"
+playlist = "Playlist"
+track = "Song"
+
+[libraryBravaisAccount]
+notSignedIn = "Not signed in"
+
+[login]
+caseAccountNotRead = "Failed to read the account"
+caseCodeExpired = "The QR code has expired"
+caseNoAnswer = "{{provider}} not responding"
+caseNotConfirmed = "Not confirmed on the phone"
+caseRefused = "Sign-in refused by {{provider}}"
+caseRetryLater = "{{provider}}: try again later"
+caseUnknown = "Sign-in failed"
+caseUnreachable = "Cannot connect to {{provider}}"
+choosePlatform = "Choose a platform"
+noteCheckNetwork = "Check your network, then try again"
+noteRetryLater = "Try again later"
+noteUnknown = "Unknown error"
+readingAccount = "Reading your account…"
+rowRanOut = "Sign-in expired"
+rowSignedIn = "Signed in"
+rowSignedOut = "Not signed in"
+title = "Log in"
+
+[playlist]
+loading = "Loading"

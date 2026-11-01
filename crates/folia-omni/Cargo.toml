@@ -13,6 +13,10 @@ netease = []
 [dependencies]
 folia-core.workspace = true
 folia-lyrics.workspace = true
+aes.workspace = true
+keyring.workspace = true
+md-5.workspace = true
+qrcode.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -117,6 +117,16 @@ impl Playback {
         self.start_current()
     }
 
+    /// Empties the queue and stops, as signing out of the active platform does (`resetForProviderSwitch`).
+    pub fn clear(&mut self) {
+        self.with_player(Player::stop);
+        self.queue.replace(Vec::new(), 0);
+        self.lyrics = None;
+        self.lyric_offset = 0.0;
+        self.seeking = None;
+        self.refresh();
+    }
+
     pub fn update(&mut self, message: Message, store: &Store) -> Task<Message> {
         match message {
             Message::Toggle => {

@@ -53,6 +53,7 @@ fn main() -> anyhow::Result<()> {
         player: store.load_or_default::<PlayerSettings>(),
         library_db: dirs.data.join("library.db"),
         cache_dir: dirs.cache.clone(),
+        keyring_service: APP_DIR.to_owned(),
         open_files: std::env::args_os().skip(1).map(std::path::PathBuf::from).collect(),
         store,
         general,

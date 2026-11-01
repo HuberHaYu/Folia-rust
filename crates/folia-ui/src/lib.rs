@@ -5,9 +5,12 @@ mod chrome;
 mod home;
 mod icons;
 mod library;
+mod login;
+mod lots;
 mod mode_picker;
 mod motion;
 mod now_playing;
+mod online;
 mod overlay;
 mod panel;
 mod playback;
@@ -59,6 +62,8 @@ pub struct Init {
     pub library_db: PathBuf,
     /// Where downloaded online audio is cached.
     pub cache_dir: PathBuf,
+    /// The system keyring service that keeps platform sessions.
+    pub keyring_service: String,
     /// Audio files given on the command line, played as a queue once the window opens.
     pub open_files: Vec<PathBuf>,
 }
@@ -104,6 +109,7 @@ pub enum Message {
     Home(home::Message),
     Panel(panel::Message),
     Art(i64, Option<folia_library::Cover>),
+    Login(login::Message),
 }
 
 /// Settings id of the random lyric style choice, as in the original app.
@@ -150,15 +156,16 @@ pub struct Shell {
     titlebar: chrome::Titlebar,
     player: folia_store::PlayerSettings,
     positioning: Option<positioner::Positioning>,
+    login: login::Login,
 }
 
 impl Shell {
     pub fn new(init: Init) -> (Self, Task<Message>) {
-        let (library, load) = LibraryPage::new(init.library_db);
         let theme = init.appearance.theme.theme();
-        let omni = Omni::new(init.cache_dir)
+        let omni = Omni::new(init.cache_dir, init.keyring_service)
             .inspect_err(|err| tracing::error!(error = err as &dyn std::error::Error, "online music unavailable"))
             .ok();
+        let (library, load) = LibraryPage::new(init.library_db, init.general.home_tab, omni.clone());
         let shell = Self {
             store: init.store,
             general: init.general,
@@ -192,6 +199,7 @@ impl Shell {
             titlebar: chrome::Titlebar::new(std::time::Instant::now()),
             player: init.player,
             positioning: None,
+            login: login::Login::new(std::time::Instant::now()),
         };
         let open = if init.open_files.is_empty() { Task::none() } else { open_files(init.open_files) };
         let window = iced::window::oldest().map(Message::WindowReady);
@@ -226,7 +234,9 @@ impl Shell {
         self.library.plan_if_needed();
         let seam = self.library.seam();
         self.home.sync_tab(self.home.is_hidden() || seam.collapsed, now);
-        self.library.sync_hint(now);
+        self.login.sync(&self.library.online.account);
+        self.library.set_tab_chrome(&mut self.home, now);
+        self.library.sync_hint(&self.i18n, now);
         self.bar.set_forced(self.positioning.is_some());
         self.bar.sync(&self.playback, self.window_size.width, now);
         self.bar.set_shown(self.chrome_visible(), now);
@@ -275,19 +285,9 @@ impl Shell {
                 if matches!(message, library::Message::Loaded(_)) {
                     self.splash.library_ready();
                 }
-                let (task, play) = self.library.update(message);
+                let (task, effect) = self.library.update(message, &self.i18n);
                 let task = task.map(Message::Library);
-                match play {
-                    Some(index) => {
-                        self.page = Page::NowPlaying;
-                        self.reveal_chrome();
-                        let origin = folia_core::Origin { name: self.i18n.t("localMusic.allSongs").to_owned() };
-                        let start =
-                            self.playback.play(self.library.tracks.clone(), index, Some(origin)).map(Message::Playback);
-                        Task::batch([task, start, self.ensure_art()])
-                    }
-                    None => task,
-                }
+                Task::batch([task, self.library_effect(effect)])
             }
             Message::Search(message) => {
                 if matches!(message, search::Message::Close) {
@@ -424,6 +424,49 @@ impl Shell {
                 Task::none()
             }
             Message::Chrome(message) => self.chrome(message),
+            Message::Login(message) => {
+                let signed_in = self.library.online.signed_in().is_some();
+                let (task, effect) = self.login.update(message, self.omni.as_ref(), signed_in);
+                let task = task.map(Message::Login);
+                let follow = match effect {
+                    Some(login::Effect::Confirmed) => self.library.signed_in().map(Message::Library),
+                    Some(login::Effect::SignOut) => {
+                        // Signing out of the active platform empties the player, as a switch does.
+                        self.playback.clear();
+                        if self.page == Page::NowPlaying {
+                            self.page = Page::Library;
+                        }
+                        self.library.sign_out(&self.i18n).map(Message::Library)
+                    }
+                    None => Task::none(),
+                };
+                Task::batch([task, follow])
+            }
+        }
+    }
+
+    /// Opens the shared sign-in window: on the platform in use when someone is signed in, unchosen for a guest.
+    fn open_login(&mut self) -> Task<Message> {
+        let signed_in = self.library.online.signed_in().is_some();
+        let provider = signed_in.then_some(online::PROVIDER);
+        self.login.open(provider, signed_in, self.omni.as_ref()).map(Message::Login)
+    }
+
+    /// Plays what the home wall chose, or keeps the tab it switched to.
+    fn library_effect(&mut self, effect: Option<library::Effect>) -> Task<Message> {
+        match effect {
+            Some(library::Effect::Play { queue, index, origin }) => {
+                self.page = Page::NowPlaying;
+                self.reveal_chrome();
+                let name = origin.unwrap_or_else(|| self.i18n.t("localMusic.allSongs").to_owned());
+                let start = self.playback.play(queue, index, Some(folia_core::Origin { name })).map(Message::Playback);
+                Task::batch([start, self.ensure_art()])
+            }
+            Some(library::Effect::SaveTab(tab)) => {
+                self.general.home_tab = tab;
+                save(&self.store, &self.general)
+            }
+            None => Task::none(),
         }
     }
 
@@ -653,6 +696,19 @@ impl Shell {
             };
             frame = frame.push(window.view(&self.i18n, &self.theme, daylight, self.window_size, values));
         }
+        let look = login::Look {
+            i18n: &self.i18n,
+            tokens: settings_kit::Tokens::new(&self.theme, daylight),
+            daylight,
+            window: self.window_size,
+            platforms: self.omni.as_ref().map(Omni::platforms).unwrap_or_default(),
+            account: &self.library.online.account,
+            avatar: self.library.online.avatar.as_ref(),
+            has_track: self.playback.current().is_some(),
+        };
+        if let Some(window) = self.login.view(look, now) {
+            frame = frame.push(window.map(Message::Login));
+        }
         // `z-[9999]`: the title bar sits above every page and dialog.
         let look = chrome::TitlebarLook {
             i18n: &self.i18n,
@@ -729,6 +785,12 @@ impl Shell {
         }
         if self.positioning.is_some() {
             parts.push(iced::event::listen_with(positioner_key));
+        }
+        if self.login.is_open() {
+            parts.push(iced::event::listen_with(login_key));
+        }
+        if self.login.animating(std::time::Instant::now()) {
+            parts.push(iced::window::frames().map(|_| Message::Login(login::Message::Frame)));
         }
         if self.splash.showing(std::time::Instant::now()) {
             parts.push(iced::window::frames().map(|_| Message::SplashFrame));
@@ -819,7 +881,43 @@ impl Shell {
             show_tab: self.home.is_hidden() || self.library.seam().collapsed,
             tab_hidden: self.home.is_hidden(),
             tab: self.home.tab(std::time::Instant::now()),
+            tabs: library::TABS.iter().map(|&tab| (tab, self.i18n.t(library::tab_label(tab)))).collect(),
+            current: self.library.tab,
+            account: self.account_slot(),
+            layer: self.library.layer_meta(&self.i18n),
         }
+    }
+
+    /// The seam's account entry on online tabs (`useBravaisHomeAccount`).
+    fn account_slot(&self) -> Option<home::AccountSlot<'_>> {
+        if !self.library.tab.is_online() || self.library.layer.is_some() {
+            return None;
+        }
+        let platform = self.omni.as_ref()?.platforms().into_iter().find(|platform| platform.id == online::PROVIDER)?;
+        let mark = folia_visualizer::color(folia_core::Rgb::hex(platform.color), 1.0);
+        let label = platform.short_name;
+        Some(match self.library.online.signed_in() {
+            Some(account) => home::AccountSlot {
+                guest: false,
+                name: account.nickname.clone(),
+                avatar: self.library.online.avatar.as_ref(),
+                letter: platform.letter,
+                mark,
+                tip: format!("{} · {label} · {}", self.i18n.t("home.switchOnlineProvider"), account.nickname),
+            },
+            None => home::AccountSlot {
+                guest: true,
+                name: self.i18n.t("libraryBravaisHome.connect").to_owned(),
+                avatar: None,
+                letter: platform.letter,
+                mark,
+                tip: format!(
+                    "{} · {label} · {}",
+                    self.i18n.t("libraryBravaisHome.connect"),
+                    self.i18n.t("libraryBravaisAccount.notSignedIn")
+                ),
+            },
+        })
     }
 
     /// Decodes the playing song's cover for the panel in the background, unless it is cached or on its way.
@@ -949,14 +1047,12 @@ impl Shell {
                 self.settings = Some(settings::Settings::open());
                 Task::none()
             }
-            home::Message::Import => {
-                let (task, _) = self.library.update(library::Message::Import);
-                task.map(Message::Library)
-            }
-            home::Message::Reload => {
-                let (task, _) = self.library.update(library::Message::Reload);
-                task.map(Message::Library)
-            }
+            home::Message::Import => self.library_message(library::Message::Import),
+            home::Message::Reload => self.library_message(library::Message::Reload),
+            home::Message::SelectTab(tab) => self.library_message(library::Message::Tab(tab)),
+            home::Message::Back => self.library_message(library::Message::Back),
+            home::Message::PlayAll => self.library_message(library::Message::PlayAll),
+            home::Message::Connect => self.open_login(),
             home::Message::Volume(volume) => {
                 self.playback.update(playback::Message::Volume(volume), &self.store).map(Message::Playback)
             }
@@ -975,6 +1071,11 @@ impl Shell {
             | home::Message::BackHover(_)
             | home::Message::Frame => Task::none(),
         }
+    }
+
+    fn library_message(&mut self, message: library::Message) -> Task<Message> {
+        let (task, effect) = self.library.update(message, &self.i18n);
+        Task::batch([task.map(Message::Library), self.library_effect(effect)])
     }
 
     fn sync_home_back(&mut self) {
@@ -1098,6 +1199,17 @@ fn iced_theme(theme: &Theme) -> iced::Theme {
         ..iced::theme::Palette::DARK
     };
     iced::Theme::custom(theme.name.clone(), palette)
+}
+
+/// Escape closes the sign-in window (Sheet's own Escape).
+fn login_key(event: iced::Event, _status: iced::event::Status, _id: iced::window::Id) -> Option<Message> {
+    match event {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            ..
+        }) => Some(Message::Login(login::Message::Close)),
+        _ => None,
+    }
 }
 
 /// Positioning mode's keyboard exits: Escape rolls back, Enter keeps the new height.

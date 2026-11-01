@@ -6,7 +6,7 @@ mod playback;
 mod player;
 
 pub use appearance::{AppearanceSettings, FrameRate, ThemeMode};
-pub use general::GeneralSettings;
+pub use general::{GeneralSettings, HomeTab};
 pub use playback::PlaybackSettings;
 pub use player::{BOTTOM_BAR_BASE, PlayerSettings, bottom_bar_max_offset, clamp_bottom_bar_offset};
 

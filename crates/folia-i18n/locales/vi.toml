@@ -134,6 +134,10 @@ seamFold = "Gập"
 seamExpand = "Mở rộng"
 seamRestore = "Mở rộng thanh thông tin"
 seamReopenHere = "Mở thanh thông tin tại đây"
+playAll = "Phát tất cả"
+seamBack = "Quay lại"
+trackCount_one = "{{count}} bài hát"
+trackCount_other = "{{count}} bài hát"
 
 [libraryBravaisHome]
 search = "Tìm kiếm"
@@ -141,10 +145,15 @@ searchSubmit = "Tìm kiếm"
 settings = "Cài đặt"
 more = "Thêm"
 backToPlayer = "Về trình phát"
+connect = "Kết nối dịch vụ trực tuyến"
 
 [libraryBravaisHome.wallHint]
 localTitle = "Chưa nhập nhạc cục bộ"
 localBody = "Chọn “{{action}}” dưới mục “⋯” trên thanh thông tin; thư mục, album và nghệ sĩ của bạn sẽ lấp đầy bức tường này."
+guestBodyWithLocal = "Chọn “{{connect}}” trên thanh thông tin để đăng nhập; danh sách phát, radio và album đã lưu của bạn sẽ lấp đầy bức tường này. Hoặc nhập thư mục nhạc trên tab {{local}}."
+guestTitle = "Chưa kết nối dịch vụ nhạc trực tuyến"
+reloginBody = "Chọn “{{connect}}” trên thanh thông tin để đăng nhập lại; danh sách phát của bạn sẽ hiển thị trở lại trên tường."
+reloginTitle = "Phiên đăng nhập {{provider}} đã hết hạn"
 
 [wallTools]
 queue = "Hàng đợi phát"
@@ -163,6 +172,27 @@ muted = "Đã tắt tiếng"
 loading = "Đang tải..."
 lattice = "Lattice"
 noResults = "Không tìm thấy kết quả."
+albums = "Album"
+closeLogin = "Đóng đăng nhập"
+dailyRecommendations = "Gợi ý hàng ngày"
+dailyRecommendationsDescription = "Bản phối hàng ngày dành riêng cho bạn"
+explore = "Khám phá"
+exploreEmpty = "Chưa có nội dung đề xuất"
+exploreFailed = "Không thể đọc nội dung đề xuất"
+loadingLibrary = "Không có nội dung"
+loginNote = "Mở ứng dụng Netease Music > Khám phá > Quét mã QR"
+loginSuccess = "Đăng nhập thành công!"
+loginTitle = "Quét bằng ứng dụng Netease"
+loginToProvider = "Đăng nhập {{provider}}"
+neteaseCharts = "Bảng xếp hạng"
+neteaseDailyPlaylists = "Danh sách phát đề xuất hàng ngày"
+personalFm = "FM cá nhân"
+playlists = "Danh sách phát"
+providerNotConfigured = "Bản Web chưa cấu hình API"
+qrScanned = "Đã quét! Xác nhận trên điện thoại."
+radio = "Radio"
+retryQr = "Làm mới mã QR"
+switchOnlineProvider = "Đổi nền tảng nhạc trực tuyến"
 
 [panel]
 cover = "Ảnh bìa"
@@ -192,6 +222,7 @@ songUnavailableTag = "Không khả dụng"
 songVideoTag = "MV"
 providerLikeUnavailable = "{{provider}} không hỗ trợ thích bài hát."
 providerPlaylistMutationUnavailable = "{{provider}} không hỗ trợ thêm bài hát vào danh sách phát."
+loginExpired = "Phiên đăng nhập hết hạn. Đăng nhập lại"
 
 [account]
 guestMode = "Chế độ khách"
@@ -202,9 +233,43 @@ qualityExhigh = "Rất cao"
 qualityUltra = "Siêu cao"
 qualityLossless = "Lossless"
 qualityHires = "Hi-Res"
+logout = "Đăng xuất"
+logoutClearsQueue = "Danh sách phát sẽ bị xóa sạch."
+logoutConfirmTitle = "Đăng xuất khỏi {{provider}}?"
 
 [lyricFile]
 button = "Nhập / xuất lời bài hát"
 
 [lyricProvider]
 netease = "NetEase Cloud Music"
+
+[libraryBravais.kind]
+album = "Album"
+feed = "Radio"
+playlist = "Danh sách phát"
+track = "Bài hát"
+
+[libraryBravaisAccount]
+notSignedIn = "Chưa đăng nhập"
+
+[login]
+caseAccountNotRead = "Đọc thông tin tài khoản thất bại"
+caseCodeExpired = "Mã QR đã hết hạn"
+caseNoAnswer = "{{provider}} không phản hồi"
+caseNotConfirmed = "Chưa xác nhận trên điện thoại"
+caseRefused = "Yêu cầu đăng nhập bị {{provider}} từ chối"
+caseRetryLater = "{{provider}} yêu cầu thử lại sau"
+caseUnknown = "Đăng nhập thất bại"
+caseUnreachable = "Không thể kết nối tới {{provider}}"
+choosePlatform = "Chọn nền tảng"
+noteCheckNetwork = "Vui lòng kiểm tra kết nối mạng rồi thử lại"
+noteRetryLater = "Vui lòng thử lại sau"
+noteUnknown = "Lỗi không xác định"
+readingAccount = "Đang đọc thông tin tài khoản…"
+rowRanOut = "Đăng nhập đã hết hạn"
+rowSignedIn = "Đã đăng nhập"
+rowSignedOut = "Chưa đăng nhập"
+title = "Đăng nhập"
+
+[playlist]
+loading = "Đang tải"

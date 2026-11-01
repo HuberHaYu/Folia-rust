@@ -1,6 +1,8 @@
 // Online music: one facade (`Omni`) over every platform provider; only providers talk to platform APIs.
 
 mod providers;
+mod qr;
+mod session;
 
 use std::future::Future;
 use std::hash::{Hash, Hasher};
@@ -9,6 +11,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use folia_core::{Lyrics, OnlineId, Track};
+
+pub use qr::LoginQr;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -24,6 +28,12 @@ pub enum OmniError {
     Response(String),
     #[error("song is not playable")]
     Unavailable,
+    #[error("not signed in")]
+    SignedOut,
+    #[error("cannot draw the sign-in code")]
+    Qr(#[from] qrcode::types::QrError),
+    #[error("system keyring refused")]
+    Keyring(#[from] keyring::Error),
     #[error("cannot write {path}")]
     Io {
         path: PathBuf,
@@ -47,6 +57,123 @@ pub struct AudioSource {
     pub preview: bool,
 }
 
+/// One platform the original lists in its sign-in window, with its mark: a letter on a colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Platform {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub short_name: &'static str,
+    pub letter: char,
+    /// `0xRRGGBB`.
+    pub color: u32,
+    /// Compiled in with a provider; the others are listed as not configured.
+    pub available: bool,
+}
+
+/// The original's providers in registration order (`providerRegistry.ts`), with the marks they declare.
+const PLATFORMS: [(&str, &str, &str, char, u32); 7] = [
+    ("netease", "NetEase Cloud Music", "网易云", '云', 0xdc2626),
+    ("kugou", "KuGou Music", "酷狗", 'K', 0x2563eb),
+    ("qq", "QQ Music", "QQ音乐", 'Q', 0x16a34a),
+    ("bodian", "波点音乐", "波点", '波', 0x0d9488),
+    ("ytm", "YouTube Music", "YT Music", 'Y', 0xe11d48),
+    ("spotify", "Spotify", "Spotify", 'S', 0x22c55e),
+    ("qishui", "汽水音乐", "汽水", '汽', 0x19a58c),
+];
+
+/// A QR sign-in session: `key` is what the platform is asked about, `url` what the phone scans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginCode {
+    pub key: String,
+    pub url: String,
+}
+
+/// What the platform says about a sign-in code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginState {
+    Waiting,
+    Scanned,
+    /// The phone confirmed; the provider now holds the session.
+    Confirmed,
+    Expired,
+    Failed {
+        code: i64,
+        message: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    pub nickname: String,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CollectionKind {
+    Playlist,
+    Album,
+    /// The account's daily songs.
+    DailySongs,
+    /// Personal FM: played straight away, not opened.
+    PersonalFm,
+}
+
+/// A playlist or an album on a platform, as a home card shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Collection {
+    pub provider: String,
+    pub id: String,
+    pub kind: CollectionKind,
+    pub name: String,
+    pub cover_url: Option<String>,
+    pub track_count: Option<u32>,
+    /// The playlist's creator, or the album's artists joined with `, `.
+    pub creator: Option<String>,
+    pub description: Option<String>,
+}
+
+impl Collection {
+    /// A stable negative id for the wall, apart from track ids.
+    pub fn wall_id(&self) -> i64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&self.provider, &self.id, self.kind).hash(&mut hasher);
+        -((hasher.finish() >> 1) as i64) - 1
+    }
+}
+
+/// The radio tab: personal FM, the daily songs and the recommended playlists (`getHomeFeed`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RadioFeed {
+    pub personal_fm: Vec<Track>,
+    pub daily_songs: Vec<Track>,
+    pub recommended: Vec<Collection>,
+    /// One part failed and is empty.
+    pub partial: bool,
+}
+
+/// Whose heading a shelf of the explore page carries: the platform's, or one the app names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shelf {
+    DailySongs,
+    DailyPlaylists,
+    Charts,
+    Block(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExploreEntry {
+    Song(Track),
+    Collection(Collection),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExploreSection {
+    pub key: String,
+    pub shelf: Shelf,
+    pub entries: Vec<ExploreEntry>,
+}
+
 /// What one platform can do. Search results are tracks whose `online` id points back at the platform.
 pub trait Provider: Send + Sync {
     fn id(&self) -> &'static str;
@@ -59,6 +186,20 @@ pub trait Provider: Send + Sync {
     ) -> BoxFuture<'a, Result<Page<Track>, OmniError>>;
     fn audio_source<'a>(&'a self, song: &'a OnlineId) -> BoxFuture<'a, Result<AudioSource, OmniError>>;
     fn lyrics<'a>(&'a self, song: &'a OnlineId) -> BoxFuture<'a, Result<Option<Lyrics>, OmniError>>;
+    fn login_code(&self) -> BoxFuture<'_, Result<LoginCode, OmniError>>;
+    fn check_login<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<LoginState, OmniError>>;
+    /// The signed-in account, or `None` when the session is missing or ran out.
+    fn account(&self) -> BoxFuture<'_, Result<Option<Account>, OmniError>>;
+    /// Tells the platform and drops the session held in memory, whatever it answers.
+    fn logout(&self) -> BoxFuture<'_, Result<(), OmniError>>;
+    /// The session to keep, serialised; `None` when nobody is signed in.
+    fn session(&self) -> Option<String>;
+    fn restore_session(&self, saved: &str) -> Result<(), OmniError>;
+    fn user_playlists<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Collection>, OmniError>>;
+    fn collection_tracks<'a>(&'a self, collection: &'a Collection) -> BoxFuture<'a, Result<Vec<Track>, OmniError>>;
+    fn favorite_albums(&self) -> BoxFuture<'_, Result<Vec<Collection>, OmniError>>;
+    fn radio_feed(&self, limit: u32) -> BoxFuture<'_, Result<RadioFeed, OmniError>>;
+    fn explore(&self) -> BoxFuture<'_, Result<Vec<ExploreSection>, OmniError>>;
 }
 
 #[derive(Clone)]
@@ -66,20 +207,36 @@ pub struct Omni {
     providers: Arc<Vec<Box<dyn Provider>>>,
     http: reqwest::Client,
     cache_dir: PathBuf,
+    keyring_service: String,
 }
 
 impl Omni {
-    /// Registers every provider compiled in; downloads go under `cache_dir/audio`.
-    pub fn new(cache_dir: PathBuf) -> Result<Self, OmniError> {
+    /// Registers every provider compiled in; downloads go under `cache_dir/audio`, sessions under `keyring_service`.
+    pub fn new(cache_dir: PathBuf, keyring_service: String) -> Result<Self, OmniError> {
         let http = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
             .build()?;
-        Ok(Self { providers: Arc::new(providers::all(&http)), http, cache_dir })
+        Ok(Self { providers: Arc::new(providers::all(&http)), http, cache_dir, keyring_service })
     }
 
     /// `(id, display name)` of each provider, in registration order.
     pub fn providers(&self) -> Vec<(&'static str, &'static str)> {
         self.providers.iter().map(|provider| (provider.id(), provider.display_name())).collect()
+    }
+
+    /// Every platform the original lists, marked available when a provider for it is compiled in.
+    pub fn platforms(&self) -> Vec<Platform> {
+        PLATFORMS
+            .iter()
+            .map(|&(id, display_name, short_name, letter, color)| Platform {
+                id,
+                display_name,
+                short_name,
+                letter,
+                color,
+                available: self.providers.iter().any(|provider| provider.id() == id),
+            })
+            .collect()
     }
 
     pub async fn search(&self, provider: &str, query: &str, limit: u32, offset: u32) -> Result<Page<Track>, OmniError> {
@@ -88,6 +245,69 @@ impl Omni {
 
     pub async fn lyrics(&self, song: &OnlineId) -> Result<Option<Lyrics>, OmniError> {
         self.provider(&song.provider)?.lyrics(song).await
+    }
+
+    /// Asks for a sign-in code and draws it as a QR matrix.
+    pub async fn login_qr(&self, provider: &str) -> Result<LoginQr, OmniError> {
+        let code = self.provider(provider)?.login_code().await?;
+        LoginQr::encode(code.key, &code.url)
+    }
+
+    pub async fn check_login(&self, provider: &str, key: &str) -> Result<LoginState, OmniError> {
+        self.provider(provider)?.check_login(key).await
+    }
+
+    pub async fn account(&self, provider: &str) -> Result<Option<Account>, OmniError> {
+        self.provider(provider)?.account().await
+    }
+
+    pub async fn logout(&self, provider: &str) -> Result<(), OmniError> {
+        self.provider(provider)?.logout().await
+    }
+
+    /// Reads the kept session from the system keyring into the provider. Blocking: call it off the UI thread.
+    pub fn restore_session(&self, provider: &str) -> Result<bool, OmniError> {
+        let target = self.provider(provider)?;
+        match session::load(&self.keyring_service, provider)? {
+            Some(saved) => {
+                target.restore_session(&saved)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Keeps the provider's session in the system keyring, or removes it when signed out. Blocking.
+    pub fn save_session(&self, provider: &str) -> Result<(), OmniError> {
+        match self.provider(provider)?.session() {
+            Some(value) => session::save(&self.keyring_service, provider, &value),
+            None => session::delete(&self.keyring_service, provider),
+        }
+    }
+
+    /// Removes the kept session from the system keyring. Blocking.
+    pub fn forget_session(&self, provider: &str) -> Result<(), OmniError> {
+        session::delete(&self.keyring_service, provider)
+    }
+
+    pub async fn user_playlists(&self, provider: &str, user: &str) -> Result<Vec<Collection>, OmniError> {
+        self.provider(provider)?.user_playlists(user).await
+    }
+
+    pub async fn collection_tracks(&self, collection: &Collection) -> Result<Vec<Track>, OmniError> {
+        self.provider(&collection.provider)?.collection_tracks(collection).await
+    }
+
+    pub async fn favorite_albums(&self, provider: &str) -> Result<Vec<Collection>, OmniError> {
+        self.provider(provider)?.favorite_albums().await
+    }
+
+    pub async fn radio_feed(&self, provider: &str, limit: u32) -> Result<RadioFeed, OmniError> {
+        self.provider(provider)?.radio_feed(limit).await
+    }
+
+    pub async fn explore(&self, provider: &str) -> Result<Vec<ExploreSection>, OmniError> {
+        self.provider(provider)?.explore().await
     }
 
     /// Downloads the song once into the cache and returns the file to play.

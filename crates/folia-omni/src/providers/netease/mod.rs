@@ -1,17 +1,27 @@
-// NetEase Cloud Music: song search, song URLs and lyrics straight from the platform's web endpoints.
+// NetEase Cloud Music: anonymous search, song URLs and lyrics, plus QR sign-in and the account's library over eapi.
+
+mod account;
+mod eapi;
+mod explore;
+mod library;
 
 use folia_core::{Lyrics, OnlineId, Track};
 use folia_lyrics::Format;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
-use crate::{AudioSource, BoxFuture, OmniError, Page, Provider};
+use crate::{
+    Account, AudioSource, BoxFuture, Collection, CollectionKind, ExploreSection, LoginCode, LoginState, OmniError,
+    Page, Provider, RadioFeed,
+};
 
 const ID: &str = "netease";
 const BASE: &str = "https://music.163.com";
 
 pub struct Netease {
     http: reqwest::Client,
+    client: eapi::Client,
 }
 
 #[derive(Deserialize)]
@@ -28,14 +38,16 @@ struct SearchResult {
     song_count: Option<u64>,
 }
 
+/// A song in either of NetEase's shapes: `ar`/`al`/`dt`, or the older `artists`/`album`/`duration`.
 #[derive(Deserialize)]
 struct Song {
     id: u64,
     name: String,
-    #[serde(default)]
+    #[serde(default, alias = "artists")]
     ar: Vec<Named>,
+    #[serde(alias = "album")]
     al: Option<Album>,
-    #[serde(default)]
+    #[serde(default, alias = "duration")]
     dt: u64,
 }
 
@@ -85,7 +97,7 @@ struct LyricText {
 
 impl Netease {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+        Self { client: eapi::Client::new(http.clone()), http }
     }
 
     /// Sends an anonymous request to the web API and decodes its JSON answer.
@@ -144,6 +156,57 @@ impl Provider for Netease {
             Ok(lyrics(response))
         })
     }
+
+    fn login_code(&self) -> BoxFuture<'_, Result<LoginCode, OmniError>> {
+        Box::pin(account::login_code(&self.client))
+    }
+
+    fn check_login<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<LoginState, OmniError>> {
+        Box::pin(account::check_login(&self.client, key))
+    }
+
+    fn account(&self) -> BoxFuture<'_, Result<Option<Account>, OmniError>> {
+        Box::pin(account::account(&self.client))
+    }
+
+    fn logout(&self) -> BoxFuture<'_, Result<(), OmniError>> {
+        Box::pin(account::logout(&self.client))
+    }
+
+    fn session(&self) -> Option<String> {
+        let session = self.client.session();
+        if !session.signed_in() {
+            return None;
+        }
+        serde_json::to_string(&session).ok()
+    }
+
+    fn restore_session(&self, saved: &str) -> Result<(), OmniError> {
+        let session: eapi::Session =
+            serde_json::from_str(saved).map_err(|err| OmniError::Response(format!("kept session: {err}")))?;
+        self.client.set_session(session);
+        Ok(())
+    }
+
+    fn user_playlists<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Collection>, OmniError>> {
+        Box::pin(library::user_playlists(&self.client, user))
+    }
+
+    fn collection_tracks<'a>(&'a self, collection: &'a Collection) -> BoxFuture<'a, Result<Vec<Track>, OmniError>> {
+        Box::pin(library::collection_tracks(&self.client, collection))
+    }
+
+    fn favorite_albums(&self) -> BoxFuture<'_, Result<Vec<Collection>, OmniError>> {
+        Box::pin(library::favorite_albums(&self.client))
+    }
+
+    fn radio_feed(&self, limit: u32) -> BoxFuture<'_, Result<RadioFeed, OmniError>> {
+        Box::pin(library::radio_feed(&self.client, limit))
+    }
+
+    fn explore(&self) -> BoxFuture<'_, Result<Vec<ExploreSection>, OmniError>> {
+        Box::pin(explore::first_page(&self.client))
+    }
 }
 
 /// Prefers word-timed YRC, falling back to LRC; translations and romanizations are LRC tracks.
@@ -177,6 +240,43 @@ fn track(song: Song) -> Track {
         online: Some(online),
         ..Track::default()
     }
+}
+
+/// The songs of a JSON list, skipping rows that are not songs.
+fn tracks(list: Option<&Value>) -> Vec<Track> {
+    list.and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(|row| Song::deserialize(row).ok()).map(track).collect())
+        .unwrap_or_default()
+}
+
+/// A playlist or album row: `coverImgUrl`/`picUrl`, `trackCount`/`size`, the creator or the artists.
+fn collection(row: &Value, kind: CollectionKind) -> Option<Collection> {
+    let id = match row.get("id")? {
+        Value::Number(number) => number.to_string(),
+        Value::String(text) if !text.is_empty() => text.clone(),
+        _ => return None,
+    };
+    let text = |key: &str| row.get(key).and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned);
+    let name = text("name")?;
+    let artists: Vec<String> = row
+        .get("artists")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter().filter_map(|artist| artist.get("name").and_then(Value::as_str)).map(str::to_owned).collect()
+        })
+        .unwrap_or_default();
+    let creator = row.pointer("/creator/nickname").and_then(Value::as_str).map(str::to_owned);
+    let count = row.get("trackCount").or_else(|| row.get("size")).and_then(Value::as_u64);
+    Some(Collection {
+        provider: ID.to_owned(),
+        id,
+        kind,
+        name,
+        cover_url: text("coverImgUrl").or_else(|| text("picUrl")).or_else(|| text("coverUrl")).map(https),
+        track_count: count.and_then(|count| u32::try_from(count).ok()),
+        creator: if artists.is_empty() { creator } else { Some(artists.join(", ")) },
+        description: text("description").or_else(|| text("copywriter")),
+    })
 }
 
 fn https(url: String) -> String {

@@ -8,6 +8,8 @@ use std::time::Instant;
 use folia_i18n::I18n;
 use folia_visualizer::Ease;
 
+use folia_store::HomeTab;
+
 use crate::motion::Tween;
 use crate::wall::Seam;
 use iced::widget::{mouse_area, space};
@@ -36,6 +38,9 @@ const NARROW: f32 = 120.0;
 const SPINE: f32 = 64.0;
 const ROW_NARROW: f32 = 72.0;
 const ROW_SPINE: f32 = 52.0;
+/// `BRAVAIS_SEAM_FULL_WIDTH` and `BRAVAIS_SEAM_ROW_FULL_HEIGHT`: a collection's full info strip.
+const FULL: f32 = 300.0;
+const ROW_FULL: f32 = 212.0;
 /// Presence spring of the player safe area: stiffness 280, damping 28.
 const PRESENCE_MS: f64 = 600.0;
 
@@ -65,10 +70,18 @@ pub enum Message {
     VolumeDone,
     Mute,
     BackHover(bool),
+    SelectTab(HomeTab),
+    /// The account entry: opens the shared sign-in window.
+    Connect,
+    /// The collection seam's back: returns to the home layer.
+    Back,
+    PlayAll,
 }
 
 pub struct HomeChrome {
     level: Level,
+    /// A collection layer is open: the narrow seam widens into the full info strip.
+    collection: bool,
     restore: Level,
     horizontal: bool,
     /// The axis to open on once the current one has shut.
@@ -103,6 +116,7 @@ impl HomeChrome {
         let now = Instant::now();
         Self {
             level: Level::Full,
+            collection: false,
             restore: Level::Full,
             horizontal: false,
             pending_horizontal: None,
@@ -152,7 +166,15 @@ impl HomeChrome {
                     self.retarget_tools(now, 0.0);
                 }
             }
-            Message::Settings | Message::Player | Message::Search | Message::Import | Message::Reload => {
+            Message::Settings
+            | Message::Player
+            | Message::Search
+            | Message::Import
+            | Message::Reload
+            | Message::SelectTab(_)
+            | Message::Connect
+            | Message::Back
+            | Message::PlayAll => {
                 self.set_menu(now, false);
                 if self.tools_goal > 0.5 {
                     self.retarget_tools(now, 0.0);
@@ -177,6 +199,18 @@ impl HomeChrome {
         }
     }
 
+    /// Opens the full info strip for a collection layer, or narrows back to the home seam.
+    pub fn set_collection(&mut self, collection: bool, now: Instant) {
+        if collection == self.collection {
+            return;
+        }
+        self.collection = collection;
+        self.set_menu(now, false);
+        if self.level != Level::Hidden {
+            self.retarget_seam(now);
+        }
+    }
+
     /// Slides the edge tab in when it becomes visible.
     pub fn sync_tab(&mut self, visible: bool, now: Instant) {
         let goal = if visible { 1.0 } else { 0.0 };
@@ -197,7 +231,7 @@ impl HomeChrome {
         self.pending_horizontal = None;
         self.horizontal = next;
         self.seam_from = 0.0;
-        self.seam_goal = open_width(self.level, next);
+        self.seam_goal = open_width(self.level, next, self.collection);
         self.seam_at = now;
         Some(next)
     }
@@ -216,7 +250,7 @@ impl HomeChrome {
 
     /// The width this level opens to, not the width it has animated to.
     pub fn goal(&self) -> f32 {
-        open_width(self.level, self.horizontal)
+        open_width(self.level, self.horizontal, self.collection)
     }
 
     pub fn set_back(&mut self, shown: bool, now: Instant) {
@@ -280,7 +314,7 @@ impl HomeChrome {
             self.level = level;
             self.restore = level;
             self.seen_width = width;
-            let open = open_width(level, self.horizontal);
+            let open = open_width(level, self.horizontal, self.collection);
             self.seam_from = open;
             self.seam_goal = open;
             self.seam_at = now;
@@ -324,7 +358,7 @@ impl HomeChrome {
             return;
         }
         self.seam_from = 0.0;
-        self.seam_goal = open_width(self.level, self.horizontal);
+        self.seam_goal = open_width(self.level, self.horizontal, self.collection);
         self.seam_at = now;
     }
 
@@ -349,7 +383,7 @@ impl HomeChrome {
 
     fn retarget_seam(&mut self, now: Instant) {
         self.seam_from = self.width(now);
-        self.seam_goal = open_width(self.level, self.horizontal);
+        self.seam_goal = open_width(self.level, self.horizontal, self.collection);
         self.seam_at = now;
     }
 
@@ -381,13 +415,15 @@ fn default_level(width: f32) -> Level {
     if default_level_is_spine(width) { Level::Spine } else { Level::Full }
 }
 
-fn open_width(level: Level, horizontal: bool) -> f32 {
-    match (level, horizontal) {
-        (Level::Hidden, _) => 0.0,
-        (Level::Spine, false) => SPINE,
-        (Level::Spine, true) => ROW_SPINE,
-        (Level::Full, false) => NARROW,
-        (Level::Full, true) => ROW_NARROW,
+fn open_width(level: Level, horizontal: bool, collection: bool) -> f32 {
+    match (level, horizontal, collection) {
+        (Level::Hidden, ..) => 0.0,
+        (Level::Spine, false, _) => SPINE,
+        (Level::Spine, true, _) => ROW_SPINE,
+        (Level::Full, false, false) => NARROW,
+        (Level::Full, true, false) => ROW_NARROW,
+        (Level::Full, false, true) => FULL,
+        (Level::Full, true, true) => ROW_FULL,
     }
 }
 
@@ -414,10 +450,28 @@ pub struct Host<'a> {
     pub horizontal: bool,
     pub opacity: f32,
     pub bottom: f32,
-    pub status: Option<&'a str>,
+    pub status: Option<String>,
     pub show_tab: bool,
     pub tab_hidden: bool,
     pub tab: f32,
+    /// The first-level tabs with their labels, and the one open.
+    pub tabs: Vec<(HomeTab, &'a str)>,
+    pub current: HomeTab,
+    /// The account entry above the tools, on online tabs only.
+    pub account: Option<AccountSlot<'a>>,
+    /// The open collection's title and count line; `None` on the home layer.
+    pub layer: Option<(String, String)>,
+}
+
+/// The seam's account entry (`BravaisSeamAccountSwitcher`).
+pub struct AccountSlot<'a> {
+    /// Nobody signed in: a plug and the connect label.
+    pub guest: bool,
+    pub name: String,
+    pub avatar: Option<&'a iced::widget::image::Handle>,
+    pub letter: char,
+    pub mark: Color,
+    pub tip: String,
 }
 
 /// Back button, then the seam, then a dismiss layer, then the tools. The seam paints over the back.

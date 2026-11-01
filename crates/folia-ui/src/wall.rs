@@ -1,16 +1,18 @@
-// Home cover wall: the original Bravais wall of album tiles, ranked outward from the centre and panned by dragging.
+// Home cover wall: the original Bravais wall of tiles, ranked outward from the centre or laid in explore lots, panned by dragging.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use folia_core::{Rgb, Theme, Track};
+use folia_core::{Rgb, Theme};
 use folia_library::{Cover, CoverCache};
+use folia_omni::Omni;
 use iced::advanced::image::Handle;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text, gradient};
 use iced::{Color, Font, Point, Rectangle, Renderer, Size, Task, Vector, mouse, window};
 
 use crate::background::blocking;
+use crate::lots::{self, LOT_COLS, LOT_ROWS, Lot};
 
 const CELL: f32 = 128.0;
 const GAP: f32 = 8.0;
@@ -89,7 +91,42 @@ const TEMPLATES: [[(i32, i32, i32, i32); SLOTS_PER_BLOCK]; 4] = [
     ],
 ];
 
-/// One tile: where it sits on the wall (unscaled pixels) and which track it shows.
+/// Explore lots stand apart by a street half a cell wide (`exploreLayout`).
+const STREET: f32 = CELL / 2.0;
+const LOT_PITCH_X: f32 = LOT_COLS as f32 * PITCH + STREET;
+const LOT_PITCH_Y: f32 = LOT_ROWS as f32 * PITCH + STREET;
+
+/// Where a tile's cover comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoverSource {
+    None,
+    /// An audio file whose embedded or sidecar cover is read.
+    Local(PathBuf),
+    /// An online cover address, downloaded once into the cache by the facade.
+    Remote(String),
+}
+
+/// What one tile shows: a song, a collection card or an explore heading.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tile {
+    /// Cover cache key and the id the playing outline matches.
+    pub id: i64,
+    pub title: String,
+    pub subtitle: String,
+    /// The corner tag; `None` numbers the tile like the local wall does.
+    pub badge: Option<String>,
+    pub cover: CoverSource,
+    /// An explore section's heading: no cover and no shade.
+    pub heading: bool,
+}
+
+/// How the wall lays its tiles: ranked slots round the origin, or the explore strip of lots.
+pub enum Shape {
+    Ranked,
+    Explore(Vec<lots::Section>),
+}
+
+/// One tile: where it sits on the wall (unscaled pixels) and which tile it shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Placement {
     rect: Rectangle,
@@ -101,6 +138,8 @@ struct Placement {
 struct Label {
     title: String,
     artist: String,
+    /// A word tag and its box; numbered tiles use the typeset's box.
+    badge: Option<(String, Size)>,
 }
 
 /// Font sizes for one window width; labels are refitted when these change.
@@ -143,6 +182,7 @@ pub enum Message {
 
 pub struct Wall {
     placements: Vec<Placement>,
+    lots: Vec<Lot>,
     labels: HashMap<usize, Label>,
     typeset: Option<Typeset>,
     viewport: Size,
@@ -169,6 +209,7 @@ impl Wall {
     pub fn new() -> Self {
         Self {
             placements: Vec::new(),
+            lots: Vec::new(),
             labels: HashMap::new(),
             typeset: None,
             viewport: Size::ZERO,
@@ -186,24 +227,48 @@ impl Wall {
 
     /// Pans so the tile at `index` sits in the middle of the wall.
     pub fn center_on(&mut self, index: usize) {
-        let Some(place) = self.placements.iter().find(|place| place.track == index) else { return };
+        let found = self.placements.iter().find(|place| place.track == index).copied().or_else(|| {
+            let lot = self.lots.iter().position(|lot| lot.tiles.contains(&index))?;
+            explore_lot(&self.lots, 0, lot as i64).into_iter().find(|place| place.track == index)
+        });
+        let Some(place) = found else { return };
         self.pan = Vector::new(place.rect.x + place.rect.width / 2.0, place.rect.y + place.rect.height / 2.0);
     }
 
-    /// Lays out `tracks` around the wall's origin and fetches what lands on screen.
-    pub fn relayout(&mut self, tracks: &[Track]) -> Task<Message> {
-        self.placements = place(tracks.len());
+    /// Lays out `tiles` around the wall's origin and fetches what lands on screen.
+    pub fn relayout(&mut self, tiles: &[Tile], shape: Shape, omni: Option<&Omni>) -> Task<Message> {
+        match shape {
+            Shape::Ranked => {
+                self.placements = place(tiles.len());
+                self.lots.clear();
+            }
+            Shape::Explore(sections) => {
+                self.placements.clear();
+                self.lots = lots::strip(&sections);
+            }
+        }
         self.pan = Vector::ZERO;
-        self.anchor_x = SEAM_ANCHOR;
-        self.anchor_y = SEAM_ANCHOR;
+        let (_, _, anchor) = self.grid();
+        self.anchor_x = anchor;
+        self.anchor_y = anchor;
         self.planned = false;
         self.coast = None;
         self.labels.clear();
         self.covers.clear();
-        self.show_visible(tracks)
+        self.pending.clear();
+        self.show_visible(tiles, omni)
     }
 
-    pub fn update(&mut self, message: Message, tracks: &[Track]) -> (Task<Message>, Option<usize>) {
+    /// The explore layout's seam stands in the street between lot columns −1 and 0.
+    fn grid(&self) -> (f32, f32, f32) {
+        if self.lots.is_empty() {
+            (BLOCK_COLS as f32 * PITCH, BLOCK_ROWS as f32 * PITCH, SEAM_ANCHOR)
+        } else {
+            (LOT_PITCH_X, LOT_PITCH_Y, -(GAP + STREET) / 2.0)
+        }
+    }
+
+    pub fn update(&mut self, message: Message, tiles: &[Tile], omni: Option<&Omni>) -> (Task<Message>, Option<usize>) {
         match message {
             Message::Viewport(size) => {
                 self.viewport = size;
@@ -212,16 +277,16 @@ impl Wall {
                     self.typeset = Some(typeset);
                     self.labels.clear();
                 }
-                (self.show_visible(tracks), None)
+                (self.show_visible(tiles, omni), None)
             }
             Message::Pan(delta) => {
                 self.pan_by(delta);
-                self.fit_visible(tracks);
+                self.fit_visible(tiles);
                 (Task::none(), None)
             }
             Message::Settled { velocity, stale } => {
                 self.release(velocity, stale);
-                (self.show_visible(tracks), None)
+                (self.show_visible(tiles, omni), None)
             }
             Message::Play(index) => (Task::none(), Some(index)),
             Message::CoversLoaded(covers) => {
@@ -236,58 +301,113 @@ impl Wall {
         }
     }
 
-    fn show_visible(&mut self, tracks: &[Track]) -> Task<Message> {
-        self.fit_visible(tracks);
-        self.load_visible(tracks)
+    fn show_visible(&mut self, tiles: &[Tile], omni: Option<&Omni>) -> Task<Message> {
+        self.fit_visible(tiles);
+        self.load_visible(tiles, omni)
     }
 
     /// Typesets the labels of tiles on screen that have none yet; measuring text is too slow to do every frame.
-    fn fit_visible(&mut self, tracks: &[Track]) {
+    fn fit_visible(&mut self, tiles: &[Tile]) {
         let Some(typeset) = self.typeset else { return };
         let missing: Vec<Placement> =
-            self.visible().filter(|placement| !self.labels.contains_key(&placement.track)).copied().collect();
+            self.visible().into_iter().filter(|placement| !self.labels.contains_key(&placement.track)).collect();
         for placement in missing {
-            let Some(track) = tracks.get(placement.track) else { continue };
+            let Some(tile) = tiles.get(placement.track) else { continue };
             let width = placement.rect.width * typeset.scale - 34.0 * typeset.scale;
-            let artist = track.artist.as_deref().unwrap_or_default();
+            let badge = tile.badge.as_ref().map(|text| {
+                let size = folia_visualizer::measure(text, typeset.badge, BADGE_FONT, f32::INFINITY);
+                (text.clone(), Size::new(size.width + 16.0 * typeset.scale, typeset.badge_box.height))
+            });
             let label = Label {
-                title: folia_visualizer::clamp_lines(&track.title, typeset.title, TITLE_FONT, width, TITLE_LINES),
-                artist: folia_visualizer::clamp_lines(artist, typeset.artist, ARTIST_FONT, width, 1),
+                title: folia_visualizer::clamp_lines(&tile.title, typeset.title, TITLE_FONT, width, TITLE_LINES),
+                artist: folia_visualizer::clamp_lines(&tile.subtitle, typeset.artist, ARTIST_FONT, width, 1),
+                badge,
             };
             self.labels.insert(placement.track, label);
         }
     }
 
-    /// Decodes covers for the tiles on screen that have none yet, on a worker thread, cropped to each tile.
-    fn load_visible(&mut self, tracks: &[Track]) -> Task<Message> {
+    /// Fetches covers for the tiles on screen that have none yet, cropped to each tile off the UI thread.
+    fn load_visible(&mut self, tiles: &[Tile], omni: Option<&Omni>) -> Task<Message> {
         // Tiles on screen are the ones the budget keeps longest; covers decode at the size they are drawn.
-        let shown: Vec<i64> =
-            self.visible().filter_map(|placement| tracks.get(placement.track)).map(|track| track.id).collect();
-        for id in &shown {
-            self.covers.touch(id);
+        let visible = self.visible();
+        for placement in &visible {
+            if let Some(tile) = tiles.get(placement.track) {
+                self.covers.touch(&tile.id);
+            }
         }
         let scale = wall_scale(self.viewport.width);
-        let wanted: Vec<(i64, PathBuf, Size)> = self
-            .visible()
-            .filter_map(|placement| Some((tracks.get(placement.track)?, placement.rect.size() * scale)))
-            .filter(|(track, _)| self.covers.peek(&track.id).is_none() && !self.pending.contains(&track.id))
-            .map(|(track, size)| (track.id, track.path.clone(), size))
-            .collect();
-        if wanted.is_empty() {
-            return Task::none();
+        let mut local: Vec<(i64, PathBuf, Size)> = Vec::new();
+        let mut remote: Vec<(i64, String, Size)> = Vec::new();
+        for placement in visible {
+            let Some(tile) = tiles.get(placement.track) else { continue };
+            if self.covers.peek(&tile.id).is_some() || !self.pending.insert(tile.id) {
+                continue;
+            }
+            let size = placement.rect.size() * scale;
+            match &tile.cover {
+                CoverSource::Local(path) => local.push((tile.id, path.clone(), size)),
+                CoverSource::Remote(url) if omni.is_some() => remote.push((tile.id, url.clone(), size)),
+                CoverSource::Remote(_) | CoverSource::None => {
+                    self.pending.remove(&tile.id);
+                    self.covers.insert(tile.id, None, 0);
+                }
+            }
         }
-        self.pending.extend(wanted.iter().map(|(id, ..)| *id));
-        let work = blocking(move || {
-            let cover =
-                |path: &PathBuf, size: Size| folia_library::cover_for(path, size.width as u32, size.height as u32);
-            wanted.into_iter().map(|(id, path, size)| (id, cover(&path, size))).collect()
-        });
-        Task::perform(work, |covers| Message::CoversLoaded(covers.unwrap_or_default()))
+        let mut tasks = Vec::new();
+        if !local.is_empty() {
+            let work = blocking(move || {
+                let cover =
+                    |path: &PathBuf, size: Size| folia_library::cover_for(path, size.width as u32, size.height as u32);
+                local.into_iter().map(|(id, path, size)| (id, cover(&path, size))).collect()
+            });
+            tasks.push(Task::perform(work, |covers| Message::CoversLoaded(covers.unwrap_or_default())));
+        }
+        if let Some(omni) = omni {
+            for (id, url, size) in remote {
+                let omni = omni.clone();
+                let work = async move {
+                    let cover = match omni.fetch_cover(&url).await {
+                        Ok(path) => blocking(move || {
+                            let bytes = std::fs::read(&path).ok()?;
+                            folia_library::cover_rgba(&bytes, size.width as u32, size.height as u32).ok()
+                        })
+                        .await
+                        .flatten(),
+                        Err(err) => {
+                            tracing::debug!(error = &err as &dyn std::error::Error, "wall cover unavailable");
+                            None
+                        }
+                    };
+                    vec![(id, cover)]
+                };
+                tasks.push(Task::perform(work, Message::CoversLoaded));
+            }
+        }
+        Task::batch(tasks)
     }
 
-    fn visible(&self) -> impl Iterator<Item = &Placement> {
+    /// The placements on screen. The explore wall has no edge, so its placements are cut from the lots in view.
+    fn visible(&self) -> Vec<Placement> {
         let screen = Rectangle::new(Point::ORIGIN, self.viewport);
-        self.placements.iter().filter(move |placement| self.screen(placement.rect).intersects(&screen))
+        let shown = |placement: &Placement| self.screen(placement.rect).intersects(&screen);
+        if self.lots.is_empty() {
+            return self.placements.iter().filter(|placement| shown(placement)).copied().collect();
+        }
+        let scale = wall_scale(self.viewport.width).max(0.01);
+        let reach = seam_push(self.seam().width, scale) / scale;
+        let center = self.pan;
+        let half = Vector::new(self.viewport.width / 2.0 / scale + reach, self.viewport.height / 2.0 / scale + reach);
+        let (left, right) = ((center.x - half.x) / LOT_PITCH_X, (center.x + half.x) / LOT_PITCH_X);
+        let (top, bottom) = ((center.y - half.y) / LOT_PITCH_Y, (center.y + half.y) / LOT_PITCH_Y);
+        let mut placements = Vec::new();
+        for row in top.floor() as i64..=bottom.floor() as i64 {
+            for column in left.floor() as i64..=right.floor() as i64 {
+                placements
+                    .extend(explore_lot(&self.lots, column, row).into_iter().filter(|placement| shown(placement)));
+            }
+        }
+        placements
     }
 
     /// A world rectangle on screen: scaled about the camera, and pushed aside by the open seam.
@@ -335,16 +455,15 @@ impl Wall {
     /// Picks a block boundary around the camera for an opening of `open` px, and yields the camera so it fits.
     pub fn replan(&mut self, open: f32) {
         let scale = wall_scale(self.viewport.width);
+        let (block_x, block_y, anchor) = self.grid();
         if self.horizontal {
-            let block = BLOCK_ROWS as f32 * PITCH;
-            let (anchor, camera) =
-                plan_opening(self.pan.y, open, self.viewport.height, self.viewport.height / 2.0, scale, block);
+            let (line, extent) = (self.viewport.height / 2.0, self.viewport.height);
+            let (anchor, camera) = plan_on_grid(self.pan.y, open, extent, line, scale, block_y, anchor);
             self.anchor_y = anchor;
             self.pan.y = camera;
         } else {
-            let block = BLOCK_COLS as f32 * PITCH;
-            let (anchor, camera) =
-                plan_opening(self.pan.x, open, self.viewport.width, self.viewport.width / 2.0, scale, block);
+            let (line, extent) = (self.viewport.width / 2.0, self.viewport.width);
+            let (anchor, camera) = plan_on_grid(self.pan.x, open, extent, line, scale, block_x, anchor);
             self.anchor_x = anchor;
             self.pan.x = camera;
         }
@@ -407,7 +526,7 @@ impl Wall {
 
     pub fn view<'a>(
         &'a self,
-        tracks: &'a [Track],
+        tracks: &'a [Tile],
         theme: &'a Theme,
         daylight: bool,
         playing: Option<i64>,
@@ -416,9 +535,24 @@ impl Wall {
     }
 }
 
+/// The placements of the lot the place `(column, row)` holds: its heading and its seats.
+fn explore_lot(lots: &[Lot], column: i64, row: i64) -> Vec<Placement> {
+    let Some(lot) = lots.get(lots::lot_at(column, row, lots.len())) else { return Vec::new() };
+    let origin = Point::new(column as f32 * LOT_PITCH_X, row as f32 * LOT_PITCH_Y);
+    let rect = |(x, y, cols, rows): lots::Seat| Rectangle {
+        x: origin.x + x as f32 * PITCH,
+        y: origin.y + y as f32 * PITCH,
+        width: cols as f32 * PITCH - GAP,
+        height: rows as f32 * PITCH - GAP,
+    };
+    std::iter::once(Placement { rect: rect(lot.heading), track: lot.heading_tile })
+        .chain(lot.tiles.iter().zip(&lot.seats).map(|(&track, &seat)| Placement { rect: rect(seat), track }))
+        .collect()
+}
+
 pub struct WallProgram<'a> {
     wall: &'a Wall,
-    tracks: &'a [Track],
+    tracks: &'a [Tile],
     theme: &'a Theme,
     daylight: bool,
     playing: Option<i64>,
@@ -484,8 +618,9 @@ impl canvas::Program<Message> for WallProgram<'_> {
                     return Some(Action::publish(Message::Settled { velocity, stale }));
                 }
 
-                let hit = self.wall.visible().find(|p| self.wall.screen(p.rect).contains(from))?;
-                (hit.track < self.tracks.len()).then(|| Action::publish(Message::Play(hit.track)))
+                let hit = self.wall.visible().into_iter().find(|p| self.wall.screen(p.rect).contains(from))?;
+                let tile = self.tracks.get(hit.track)?;
+                (!tile.heading).then(|| Action::publish(Message::Play(hit.track)))
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 cursor.position_in(bounds)?;
@@ -511,13 +646,14 @@ impl canvas::Program<Message> for WallProgram<'_> {
         let Some(typeset) = self.wall.typeset else { return vec![frame.into_geometry()] };
         let palette = Palette::new(self.theme, self.daylight);
         for placement in self.wall.visible() {
-            let Some(track) = self.tracks.get(placement.track) else { continue };
-            let tile = Tile {
+            let Some(item) = self.tracks.get(placement.track) else { continue };
+            let tile = Drawn {
                 rect: self.wall.screen(placement.rect),
                 index: placement.track,
-                cover: self.wall.covers.peek(&track.id).and_then(Option::as_ref),
+                cover: self.wall.covers.peek(&item.id).and_then(Option::as_ref),
                 label: self.wall.labels.get(&placement.track),
-                current: self.playing == Some(track.id),
+                current: self.playing == Some(item.id),
+                heading: item.heading,
             };
             draw_tile(&mut frame, &tile, &typeset, &palette);
         }
@@ -549,18 +685,26 @@ impl Palette {
     }
 }
 
-struct Tile<'a> {
+struct Drawn<'a> {
     rect: Rectangle,
     index: usize,
     cover: Option<&'a Handle>,
     label: Option<&'a Label>,
     current: bool,
+    heading: bool,
 }
 
 // Everything is drawn in window coordinates: iced's `with_clip` does not move images and text into the clip.
-fn draw_tile(frame: &mut Frame, tile: &Tile, typeset: &Typeset, palette: &Palette) {
+fn draw_tile(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Palette) {
     let Rectangle { x, y, width, height } = tile.rect;
     frame.fill_rectangle(tile.rect.position(), tile.rect.size(), palette.poster);
+    if tile.heading {
+        draw_badge(frame, tile, typeset, palette);
+        if let Some(label) = tile.label {
+            draw_copy(frame, tile.rect, label, typeset, palette.ink);
+        }
+        return;
+    }
     if let Some(handle) = tile.cover {
         frame.draw_image(tile.rect, canvas::Image::new(handle.clone()));
     }
@@ -583,13 +727,14 @@ fn draw_tile(frame: &mut Frame, tile: &Tile, typeset: &Typeset, palette: &Palett
 }
 
 /// The track number in the top-left corner: 14px in, 11px heavy figures on a 62% shade (78% when playing).
-fn draw_badge(frame: &mut Frame, tile: &Tile, typeset: &Typeset, palette: &Palette) {
+fn draw_badge(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Palette) {
     let inset = 14.0 * typeset.scale;
     let origin = Point::new(tile.rect.x + inset, tile.rect.y + inset);
-    let size = typeset.badge_box;
+    let word = tile.label.and_then(|label| label.badge.as_ref());
+    let size = word.map_or(typeset.badge_box, |(_, size)| *size);
     frame.fill_rectangle(origin, size, palette.shade(if tile.current { 0.78 } else { 0.62 }));
     frame.fill_text(Text {
-        content: format!("{:02}", tile.index + 1),
+        content: word.map_or_else(|| format!("{:02}", tile.index + 1), |(text, _)| text.clone()),
         position: Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0),
         color: if tile.current { palette.accent } else { palette.ink },
         size: typeset.badge.into(),
@@ -771,15 +916,20 @@ pub fn wider_span(center: f32, width: f32, extent: f32) -> (f32, f32) {
 
 /// `blockSeamPlan`: the boundary near `camera`, and the camera after the smallest yield that fits `open`.
 pub fn plan_opening(camera: f32, open: f32, extent: f32, line: f32, scale: f32, block: f32) -> (f32, f32) {
+    plan_on_grid(camera, open, extent, line, scale, block, SEAM_ANCHOR)
+}
+
+/// `blockSeamPlan` on a grid whose boundaries sit at `index × block + anchor`.
+fn plan_on_grid(camera: f32, open: f32, extent: f32, line: f32, scale: f32, block: f32, anchor: f32) -> (f32, f32) {
     if block <= 1.0 || scale <= 0.0 || extent <= 0.0 {
-        return (SEAM_ANCHOR, camera);
+        return (anchor, camera);
     }
     let need = open / 2.0 + SEAM_EDGE;
-    let base = js_round((camera + GAP / 2.0) / block);
-    let mut best = (SEAM_ANCHOR, camera);
+    let base = js_round((camera - anchor) / block);
+    let mut best = (anchor, camera);
     let mut best_score = f32::INFINITY;
     for index in (base - 1)..=(base + 1) {
-        let at = index as f32 * block - GAP / 2.0;
+        let at = index as f32 * block + anchor;
         let screen = line + (at - camera) * scale;
         let fit = need.max((extent - need).min(screen));
         let next = at - (fit - line) / scale;

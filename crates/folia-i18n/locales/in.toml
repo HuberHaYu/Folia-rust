@@ -134,6 +134,10 @@ seamFold = "Lipat"
 seamExpand = "Bentangkan"
 seamRestore = "Bentangkan strip info"
 seamReopenHere = "Belah di sini"
+playAll = "Putar semua"
+seamBack = "Kembali"
+trackCount_one = "{{count}} lagu"
+trackCount_other = "{{count}} lagu"
 
 [libraryBravaisHome]
 search = "Cari"
@@ -141,10 +145,15 @@ searchSubmit = "Cari"
 settings = "Pengaturan"
 more = "Lainnya"
 backToPlayer = "Kembali ke pemutar"
+connect = "Hubungkan layanan streaming"
 
 [libraryBravaisHome.wallHint]
 localTitle = "Belum ada musik lokal yang diimpor"
 localBody = "Pilih “{{action}}” di menu “⋯” pada strip info, lalu folder, album, dan artis Anda akan memenuhi dinding ini."
+guestBodyWithLocal = "Pilih “{{connect}}” di strip info untuk masuk, lalu playlist, radio, dan album simpanan Anda akan memenuhi dinding ini. Atau impor folder musik di tab {{local}}."
+guestTitle = "Belum ada layanan streaming yang terhubung"
+reloginBody = "Pilih “{{connect}}” di strip info untuk masuk lagi, lalu playlist Anda akan kembali memenuhi dinding ini."
+reloginTitle = "Sesi {{provider}} Anda sudah kedaluwarsa"
 
 [wallTools]
 queue = "Antrean putar"
@@ -163,6 +172,27 @@ muted = "Dibisukan"
 loading = "Memuat..."
 lattice = "Kolase antrean"
 noResults = "Tidak ada hasil ditemukan."
+albums = "Album"
+closeLogin = "Tutup login"
+dailyRecommendations = "Rekomendasi Harian"
+dailyRecommendationsDescription = "Campuran harian yang dibuat khusus untuk Anda"
+explore = "Jelajahi"
+exploreEmpty = "Belum ada rekomendasi"
+exploreFailed = "Rekomendasi tidak dapat dibaca"
+loadingLibrary = "Tidak ada konten"
+loginNote = "Buka Aplikasi Netease Music > Discover > Pindai QR"
+loginSuccess = "Login Berhasil!"
+loginTitle = "Pindai dengan Aplikasi Netease"
+loginToProvider = "Masuk ke {{provider}}"
+neteaseCharts = "Tangga lagu"
+neteaseDailyPlaylists = "Playlist harian untuk Anda"
+personalFm = "FM Pribadi"
+playlists = "Playlist"
+providerNotConfigured = "API tidak dikonfigurasi untuk Web"
+qrScanned = "Dipindai! Konfirmasi di ponsel Anda."
+radio = "Radio"
+retryQr = "Muat ulang kode QR"
+switchOnlineProvider = "Ganti penyedia musik online"
 
 [panel]
 cover = "Sampul"
@@ -192,6 +222,7 @@ songUnavailableTag = "Tidak Tersedia"
 songVideoTag = "MV"
 providerLikeUnavailable = "{{provider}} tidak mendukung fitur menyukai lagu."
 providerPlaylistMutationUnavailable = "{{provider}} tidak mendukung penambahan lagu ke playlist."
+loginExpired = "Login kedaluwarsa. Silakan login lagi"
 
 [account]
 guestMode = "Mode Tamu"
@@ -202,9 +233,43 @@ qualityExhigh = "Sangat Tinggi"
 qualityUltra = "Ultra Tinggi"
 qualityLossless = "Lossless"
 qualityHires = "Hi-Res"
+logout = "Logout"
+logoutClearsQueue = "Antrean akan dikosongkan."
+logoutConfirmTitle = "Logout dari {{provider}}?"
 
 [lyricFile]
 button = "Impor / ekspor lirik"
 
 [lyricProvider]
 netease = "NetEase Cloud Music"
+
+[libraryBravais.kind]
+album = "Album"
+feed = "Radio"
+playlist = "Playlist"
+track = "Lagu"
+
+[libraryBravaisAccount]
+notSignedIn = "Belum masuk"
+
+[login]
+caseAccountNotRead = "Gagal membaca akun"
+caseCodeExpired = "Kode QR sudah kedaluwarsa"
+caseNoAnswer = "{{provider}} tidak merespons"
+caseNotConfirmed = "Belum dikonfirmasi di ponsel"
+caseRefused = "Proses masuk ditolak oleh {{provider}}"
+caseRetryLater = "{{provider}}: coba lagi nanti"
+caseUnknown = "Proses masuk gagal"
+caseUnreachable = "Tidak dapat terhubung ke {{provider}}"
+choosePlatform = "Pilih platform"
+noteCheckNetwork = "Periksa jaringan, lalu coba lagi"
+noteRetryLater = "Coba lagi nanti"
+noteUnknown = "Kesalahan tidak diketahui"
+readingAccount = "Membaca akun…"
+rowRanOut = "Login kedaluwarsa"
+rowSignedIn = "Sudah login"
+rowSignedOut = "Belum login"
+title = "Masuk"
+
+[playlist]
+loading = "Memuat"
