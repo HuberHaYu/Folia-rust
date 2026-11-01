@@ -6,7 +6,7 @@ mod registry;
 pub mod styles;
 
 pub use anim::{Ease, keyframes, spring, tween};
-pub use preview::{POSTER_TIME, PREVIEW_LOOP, STAGE_HEIGHT, STAGE_WIDTH, preview_lyrics};
+pub use preview::{Frozen, POSTER_TIME, PREVIEW_LOOP, Pictures, STAGE_HEIGHT, STAGE_WIDTH, preview_lyrics};
 pub use registry::Style;
 
 use std::cell::RefCell;
@@ -54,34 +54,43 @@ impl<Message> canvas::Program<Message> for Scene<'_> {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let target = bounds.size();
-        // A picture lays out on its stage and is scaled down to cover the widget.
-        let (size, scale) = match self.stage {
-            Some(stage) if stage.width > 0.0 && stage.height > 0.0 => {
-                (stage, (target.width / stage.width).max(target.height / stage.height))
-            }
-            _ => (target, 1.0),
-        };
+        if self.style == Style::Still {
+            return vec![styles::still::draw(self, state, renderer, target)];
+        }
+        let mut frame = Frame::new(renderer, target);
+        self.paint(state, &mut frame, target);
+        vec![frame.into_geometry()]
+    }
+}
+
+impl Scene<'_> {
+    /// The stage this scene lays out on: its own `stage`, or the widget size.
+    fn stage_size(&self, target: Size) -> Size {
+        match self.stage {
+            Some(stage) if stage.width > 0.0 && stage.height > 0.0 => stage,
+            _ => target,
+        }
+    }
+
+    /// Fills `target` with the theme background, then draws the stage scaled down to cover it.
+    pub(crate) fn paint(&self, state: &SceneState, frame: &mut Frame, target: Size) {
+        let size = self.stage_size(target);
+        frame.fill_rectangle(iced::Point::ORIGIN, target, color(self.theme.background, 1.0));
+        let scale = (target.width / size.width).max(target.height / size.height);
+        if (scale - 1.0).abs() > f32::EPSILON {
+            frame.translate(iced::Vector::new(
+                (target.width - size.width * scale) / 2.0,
+                (target.height - size.height * scale) / 2.0,
+            ));
+            frame.scale(scale);
+        }
         match self.style {
-            Style::Classic | Style::Partita | Style::Tilt | Style::Claddagh | Style::Cadenza => {
-                let mut frame = Frame::new(renderer, target);
-                frame.fill_rectangle(iced::Point::ORIGIN, target, color(self.theme.background, 1.0));
-                if scale != 1.0 {
-                    frame.translate(iced::Vector::new(
-                        (target.width - size.width * scale) / 2.0,
-                        (target.height - size.height * scale) / 2.0,
-                    ));
-                    frame.scale(scale);
-                }
-                match self.style {
-                    Style::Partita => styles::partita::draw(self, &mut state.partita.borrow_mut(), &mut frame, size),
-                    Style::Tilt => styles::tilt::draw(self, &mut state.tilt.borrow_mut(), &mut frame, size),
-                    Style::Claddagh => styles::claddagh::draw(self, &mut state.claddagh.borrow_mut(), &mut frame, size),
-                    Style::Cadenza => styles::cadenza::draw(self, &mut state.cadenza.borrow_mut(), &mut frame, size),
-                    _ => styles::classic::draw(self, &mut state.classic.borrow_mut(), &mut frame, size),
-                }
-                vec![frame.into_geometry()]
-            }
-            Style::Still => vec![styles::still::draw(self, &state.still, renderer, target, size)],
+            Style::Partita => styles::partita::draw(self, &mut state.partita.borrow_mut(), frame, size),
+            Style::Tilt => styles::tilt::draw(self, &mut state.tilt.borrow_mut(), frame, size),
+            Style::Claddagh => styles::claddagh::draw(self, &mut state.claddagh.borrow_mut(), frame, size),
+            Style::Cadenza => styles::cadenza::draw(self, &mut state.cadenza.borrow_mut(), frame, size),
+            Style::Still => styles::still::draw_stage(self, frame, size),
+            Style::Classic => styles::classic::draw(self, &mut state.classic.borrow_mut(), frame, size),
         }
     }
 }

@@ -7,7 +7,7 @@ use iced::font::Weight;
 use iced::widget::canvas::{Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Font, Point, Renderer, Size, Vector};
 
-use crate::{Scene, color, measure};
+use crate::{Scene, SceneState, color, measure};
 
 const MAX_WIDTH: f32 = 896.0;
 const SIDE_PADDING: f32 = 48.0;
@@ -35,26 +35,20 @@ struct Block<'a> {
     gap_above: f32,
 }
 
-/// Draws into `target`; the layout is made for `size` and scaled down to cover `target` when they differ.
-pub fn draw(scene: &Scene<'_>, state: &StillCache, renderer: &Renderer, target: Size, size: Size) -> Geometry {
+/// Draws into `target`, redrawing only when the line, the size or the font scale changes.
+pub fn draw(scene: &Scene<'_>, state: &SceneState, renderer: &Renderer, target: Size) -> Geometry {
     let index = current_index(scene.lyrics, scene.time);
     let key = Some((index, target.width.to_bits(), target.height.to_bits(), scene.font_scale.to_bits()));
-    if state.key.replace(key) != key {
-        state.cache.clear();
+    if state.still.key.replace(key) != key {
+        state.still.cache.clear();
     }
-    let scale = (target.width / size.width).max(target.height / size.height);
-    state.cache.draw(renderer, target, |frame| {
-        frame.fill_rectangle(Point::ORIGIN, target, color(scene.theme.background, 1.0));
-        if (scale - 1.0).abs() > f32::EPSILON {
-            frame.translate(iced::Vector::new(
-                (target.width - size.width * scale) / 2.0,
-                (target.height - size.height * scale) / 2.0,
-            ));
-            frame.scale(scale);
-        }
-        vignette(frame, size);
-        draw_lines(frame, scene, index, size);
-    })
+    state.still.cache.draw(renderer, target, |frame| scene.paint(state, frame, target))
+}
+
+/// The vignette and the lines, laid out on a stage of `size`.
+pub(crate) fn draw_stage(scene: &Scene<'_>, frame: &mut Frame, size: Size) {
+    vignette(frame, size);
+    draw_lines(frame, scene, current_index(scene.lyrics, scene.time), size);
 }
 
 /// The line on screen: the latest one that has started, or the first before any has.

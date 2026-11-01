@@ -79,6 +79,7 @@ pub struct Pickers {
     enter: [Tween; 2],
     chevron: [Tween; 2],
     preview: Lyrics,
+    pictures: folia_visualizer::Pictures,
 }
 
 /// What the rows need from the panel.
@@ -108,6 +109,7 @@ impl Pickers {
             enter: [enter; 2],
             chevron: [chevron; 2],
             preview: folia_visualizer::preview_lyrics(),
+            pictures: folia_visualizer::Pictures::default(),
         }
     }
 
@@ -360,7 +362,11 @@ impl Pickers {
                     font_scale: look.font_scale,
                     stage: Some(Size::new(folia_visualizer::STAGE_WIDTH, folia_visualizer::STAGE_HEIGHT)),
                 };
-                canvas(scene).width(Length::Fill).height(Length::Fill).into()
+                if hovered {
+                    canvas(scene).width(Length::Fill).height(Length::Fill).into()
+                } else {
+                    canvas(self.pictures.frozen(scene)).width(Length::Fill).height(Length::Fill).into()
+                }
             }
             (Row::Style, None) => container(icon(Icon::Shuffle, 28.0, fade(tokens.accent))).center(Length::Fill).into(),
             (Row::Background, _) => container(glyph(which, index, 22.0, fade(tokens.t2))).center(Length::Fill).into(),

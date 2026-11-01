@@ -1,6 +1,13 @@
 // The sample song the style pictures play, from the original `PreviewPlaceholder.ts` (`default`).
 
-use folia_core::{Line, Lyrics, Word};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use folia_core::{Line, Lyrics, Theme, Word};
+use iced::widget::canvas::{self, Cache, Geometry};
+use iced::{Rectangle, Renderer, mouse};
+
+use crate::{Scene, SceneState, Style};
 
 /// `loopDuration` of the sample.
 pub const PREVIEW_LOOP: f64 = 14.4;
@@ -59,4 +66,75 @@ fn line(start: f64, end: f64, text: &str, tokens: Option<&[&str]>, translation: 
         })
         .collect();
     Line { words, start, end, text: text.to_owned(), translation: Some(translation.to_owned()), romanization: None }
+}
+
+/// What a kept picture shows, as `pictureImages.ts` names it: the style, the theme, the settings and the moment.
+#[derive(PartialEq)]
+struct PictureKey {
+    style: Style,
+    theme: Theme,
+    font_scale: u32,
+    time: u64,
+}
+
+/// The images of the small pictures, kept while the app runs so a picker opened again shows them at once.
+#[derive(Default)]
+pub struct Pictures {
+    images: RefCell<Vec<(PictureKey, Rc<Cache>)>>,
+}
+
+impl Pictures {
+    /// `KEPT`: more than every style in two themes; the oldest go first.
+    const KEPT: usize = 64;
+
+    /// `scene` drawn once into its kept image, then shown from it.
+    pub fn frozen<'a>(&self, scene: Scene<'a>) -> Frozen<'a> {
+        let mut images = self.images.borrow_mut();
+        let found = images.iter().position(|(key, _)| {
+            key.style == scene.style
+                && key.theme == *scene.theme
+                && key.font_scale == scene.font_scale.to_bits()
+                && key.time == scene.time.to_bits()
+        });
+        let entry = match found {
+            Some(index) => images.remove(index),
+            None => {
+                let key = PictureKey {
+                    style: scene.style,
+                    theme: scene.theme.clone(),
+                    font_scale: scene.font_scale.to_bits(),
+                    time: scene.time.to_bits(),
+                };
+                (key, Rc::new(Cache::new()))
+            }
+        };
+        let image = entry.1.clone();
+        images.push(entry);
+        if images.len() > Self::KEPT {
+            images.remove(0);
+        }
+        Frozen { scene, image }
+    }
+}
+
+/// A picture shown from its kept image; the image is redrawn only when the widget changes size.
+pub struct Frozen<'a> {
+    scene: Scene<'a>,
+    image: Rc<Cache>,
+}
+
+impl<Message> canvas::Program<Message> for Frozen<'_> {
+    type State = SceneState;
+
+    fn draw(
+        &self,
+        state: &SceneState,
+        renderer: &Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let target = bounds.size();
+        vec![self.image.draw(renderer, target, |frame| self.scene.paint(state, frame, target))]
+    }
 }
