@@ -2,6 +2,7 @@
 
 mod background;
 mod chrome;
+mod drag_capture;
 mod home;
 mod icons;
 mod library;
@@ -16,6 +17,8 @@ mod panel;
 mod playback;
 mod player_bar;
 mod positioner;
+mod poster;
+mod queue_island;
 mod search;
 mod settings;
 mod settings_kit;
@@ -241,6 +244,14 @@ impl Shell {
         self.bar.set_forced(self.positioning.is_some());
         self.bar.sync(&self.playback, self.window_size.width, now);
         self.bar.set_shown(self.chrome_visible(), now);
+        let room = panel::Room {
+            width: self.window_size.width,
+            height: self.window_size.height,
+            bottom: self.bar_offset(),
+            queue: self.playback.queue.items(),
+            index: self.playback.queue.current_index(),
+        };
+        self.panel.follow(room);
         task
     }
 
@@ -692,7 +703,6 @@ impl Shell {
                 drawn_style: self.style(),
                 origin: self.playback.queue.origin().map(|origin| origin.name.as_str()),
                 art: self.playback.current().and_then(|track| self.art.peek(&track.id)).and_then(Option::as_ref),
-                hover: self.panel.hover(),
                 pill_hover: self.panel.pill_hover(),
             };
             frame = frame.push(self.panel.view(panel_view, std::time::Instant::now()).map(Message::Panel));
@@ -903,6 +913,7 @@ impl Shell {
                 self.playback.current().map(|track| track.id),
                 (self.window_size.height / home::LIST_ROW) as usize,
             ),
+            poster_ground: self.library.poster_ground(),
             list_hover: self.library.layer.as_ref().and_then(|layer| layer.list_hover),
         }
     }
@@ -995,7 +1006,16 @@ impl Shell {
 
     fn panel(&mut self, message: panel::Message) -> Task<Message> {
         let style = self.appearance.visualizer.clone();
-        match self.panel.update(&message, &style) {
+        let room = panel::Room {
+            width: self.window_size.width,
+            height: self.window_size.height,
+            bottom: self.bar_offset(),
+            queue: self.playback.queue.items(),
+            index: self.playback.queue.current_index(),
+        };
+        let (effect, scroll) = self.panel.update(&message, &style, room);
+        let scroll = scroll.map(Message::Panel);
+        let task = match effect {
             panel::Effect::None => Task::none(),
             panel::Effect::Home => {
                 self.page = Page::Library;
@@ -1034,7 +1054,8 @@ impl Shell {
                 self.appearance.visualizer = style.map_or(RANDOM_STYLE, Style::id).to_owned();
                 save(&self.store, &self.appearance)
             }
-        }
+        };
+        Task::batch([task, scroll])
     }
 
     fn home(&mut self, message: home::Message) -> Task<Message> {
@@ -1072,6 +1093,7 @@ impl Shell {
             home::Message::EnqueueAll => self.library_message(library::Message::EnqueueAll),
             home::Message::Query(query) => self.library_message(library::Message::Query(query)),
             home::Message::OpenList => self.library_message(library::Message::OpenList),
+            home::Message::OpenFilter => self.library_message(library::Message::OpenFilter),
             home::Message::ListScrolled(offset) => self.library_message(library::Message::ListScrolled(offset)),
             home::Message::LocateRow(row) => self.library_message(library::Message::LocateRow(row)),
             home::Message::PlayRow(row) => self.library_message(library::Message::PlayRow(row)),

@@ -9,13 +9,14 @@ use folia_store::ThemeMode;
 use folia_visualizer::{Ease, Style};
 use iced::widget::text::LineHeight;
 use iced::widget::{button, column, container, image, mouse_area, row, shader, slider, space, stack, text, tooltip};
-use iced::{Alignment, Background, Border, Color, Element, Length, Size, Theme as IcedTheme};
+use iced::{Alignment, Background, Border, Color, Element, Length, Size, Task, Theme as IcedTheme};
 use lucide_static_svg::Icon;
 
 use crate::icons::icon;
 use crate::mode_picker;
 use crate::motion::{CSS_TRANSITION, Tween};
 use crate::playback;
+use crate::queue_island::{self, QueueList};
 use crate::settings_kit::{self, Tokens};
 
 const OPEN_MS: f64 = 300.0;
@@ -56,15 +57,11 @@ pub enum Message {
     PillHover(bool),
     /// Sets the lyric timeline offset, in milliseconds.
     Offset(i64),
-    Hover(Option<usize>),
+    Queue(queue_island::Message),
     Volume(f32),
     VolumeDone,
     Mute,
     Repeat,
-    Jump(usize),
-    Remove(usize),
-    MoveNext(usize),
-    MoveEnd(usize),
     Home,
     Locate,
     Settings,
@@ -89,8 +86,8 @@ pub struct PlayerPanel {
     tab: Tab,
     /// Playing-page chrome is up. The handle stays with it (`hideToggleButton`).
     chrome: bool,
-    hover: Option<usize>,
     pill_hover: bool,
+    queue: QueueList,
     /// Surface opacity and scale: 0 is `{ opacity: 0, scale: 0.92 }`, 1 is open.
     surface: Tween,
     /// Handle presence: `{ opacity: 0, x: 20, y: 12, scale: 0.92 }` at 0.
@@ -111,8 +108,8 @@ impl PlayerPanel {
             open: false,
             tab: Tab::Cover,
             chrome: true,
-            hover: None,
             pill_hover: false,
+            queue: QueueList::default(),
             surface: Tween::new(0.0, OPEN_MS, OPEN_EASE, now),
             handle: Tween::new(1.0, HANDLE_MS, Ease::OUT, now),
             handle_tone: Tween::new(0.0, HANDLE_TONE_MS, CSS_TRANSITION, now),
@@ -131,10 +128,6 @@ impl PlayerPanel {
         self.pill_hover
     }
 
-    pub fn hover(&self) -> Option<usize> {
-        self.hover
-    }
-
     /// Shows or hides the handle with the playing-page chrome.
     pub fn set_chrome(&mut self, visible: bool, now: Instant) {
         self.chrome = visible;
@@ -147,24 +140,48 @@ impl PlayerPanel {
             .chain(&self.fold)
             .any(|tween| tween.running(now))
             || (self.open && self.pickers.animating(now))
+            || (self.open && self.tab == Tab::Queue && self.queue.animating(now))
     }
 
-    pub fn update(&mut self, message: &Message, style_id: &str) -> Effect {
+    /// The playing song changed: the open queue list scrolls to it (`align: 'smart'`).
+    pub fn follow(&mut self, room: Room<'_>) {
+        let list_h = queue_list_h(room.width, room.height, room.bottom, self.chrome, room.queue.len());
+        self.queue.follow(room.queue, room.index, list_h, Instant::now());
+    }
+
+    pub fn update(&mut self, message: &Message, style_id: &str, room: Room<'_>) -> (Effect, Task<Message>) {
         let now = Instant::now();
-        match message {
+        let list_h = queue_list_h(room.width, room.height, room.bottom, self.chrome, room.queue.len());
+        let effect = match message {
             Message::Toggle => {
                 self.set_open(!self.open, now);
+                if self.open && self.tab == Tab::Queue {
+                    self.queue.opened();
+                }
                 Effect::None
             }
             Message::Choose(tab) => {
+                if *tab == Tab::Queue && self.tab != Tab::Queue {
+                    self.queue.opened();
+                }
                 self.tab = *tab;
                 self.fold_to(*tab, now);
                 self.pickers.set_open(None, now);
                 Effect::None
             }
-            Message::Hover(index) => {
-                self.hover = *index;
-                Effect::None
+            Message::Queue(message) => {
+                let (task, change) = self.queue.update(message.clone(), room.queue, list_h);
+                let effect = match change {
+                    Some(queue_island::Change::Jump(index)) => Effect::Playback(playback::Message::Jump(index)),
+                    Some(queue_island::Change::MoveNext(index)) => Effect::Playback(playback::Message::MoveNext(index)),
+                    Some(queue_island::Change::MoveEnd(index)) => Effect::Playback(playback::Message::MoveEnd(index)),
+                    Some(queue_island::Change::Remove(index)) => Effect::Playback(playback::Message::Remove(index)),
+                    Some(queue_island::Change::Reorder(from, to)) => {
+                        Effect::Playback(playback::Message::Reorder(from, to))
+                    }
+                    None => Effect::None,
+                };
+                return (effect, task.map(Message::Queue));
             }
             Message::PillHover(hovered) => {
                 self.pill_hover = *hovered;
@@ -179,10 +196,6 @@ impl PlayerPanel {
             Message::Mute => Effect::Playback(playback::Message::ToggleMute),
             Message::Offset(ms) => Effect::Playback(playback::Message::LyricOffset(*ms as f64 / 1000.0)),
             Message::Repeat => Effect::Playback(playback::Message::CycleRepeat),
-            Message::Jump(index) => Effect::Playback(playback::Message::Jump(*index)),
-            Message::Remove(index) => Effect::Playback(playback::Message::Remove(*index)),
-            Message::MoveNext(index) => Effect::Playback(playback::Message::MoveNext(*index)),
-            Message::MoveEnd(index) => Effect::Playback(playback::Message::MoveEnd(*index)),
             Message::Home => {
                 self.set_open(false, now);
                 Effect::Home
@@ -205,8 +218,15 @@ impl PlayerPanel {
                 }
             },
             Message::Intensity => Effect::Intensity,
-            Message::Frame => Effect::None,
-        }
+            Message::Frame => {
+                if self.open && self.tab == Tab::Queue {
+                    let task = self.queue.frame(room.queue, room.index, list_h, now);
+                    return (Effect::None, task.map(Message::Queue));
+                }
+                Effect::None
+            }
+        };
+        (effect, Task::none())
     }
 
     pub fn view<'a>(&'a self, view: View<'a>, now: Instant) -> Element<'a, Message> {
@@ -220,11 +240,11 @@ impl PlayerPanel {
             hover: self.handle_hover.value(now),
         };
         let handle = (shown > 0.0).then(|| handle_button(view, look));
-        match (surface, handle) {
-            (Some(surface), Some(handle)) => stack![surface, handle].into(),
-            (Some(surface), None) => surface,
-            (None, Some(handle)) => handle,
-            (None, None) => space().into(),
+        // Always the same two layers: the handle coming and going must not rebuild the surface's widget state
+        // (the queue list's scroll position).
+        match surface {
+            Some(surface) => stack![surface, handle.unwrap_or_else(|| space().into())].into(),
+            None => handle.unwrap_or_else(|| space().into()),
         }
     }
 
@@ -255,6 +275,16 @@ impl PlayerPanel {
     }
 }
 
+/// What the panel's update needs of the window and the queue.
+#[derive(Clone, Copy)]
+pub struct Room<'a> {
+    pub width: f32,
+    pub height: f32,
+    pub bottom: f32,
+    pub queue: &'a [Track],
+    pub index: Option<usize>,
+}
+
 #[derive(Clone, Copy)]
 pub struct View<'a> {
     pub i18n: &'a I18n,
@@ -280,7 +310,6 @@ pub struct View<'a> {
     pub drawn_style: Style,
     pub origin: Option<&'a str>,
     pub art: Option<&'a iced::widget::image::Handle>,
-    pub hover: Option<usize>,
     pub pill_hover: bool,
 }
 
@@ -337,7 +366,7 @@ fn surface<'a>(panel: &'a PlayerPanel, view: View<'a>, open: f32, now: Instant) 
     .width(Length::Fixed(x1 - x0))
     .height(Length::Fixed(y1 - y0));
     let column = Column { tab, width: panel_w, header_h, body_h, cover_px, open, fold };
-    let face = mouse_area(face_column(view, tokens, column, (&panel.pickers, now)))
+    let face = mouse_area(face_column(view, tokens, column, (panel, now)))
         .on_press(Message::Frame)
         .interaction(iced::mouse::Interaction::Idle);
     let face = container(face).width(Length::Fixed(panel_w)).height(Length::Fixed(visual_h));
@@ -372,7 +401,7 @@ fn surface<'a>(panel: &'a PlayerPanel, view: View<'a>, open: f32, now: Instant) 
 }
 
 /// The mode rows' pickers and the frame time, for the controls tab.
-type Rows<'a> = (&'a mode_picker::Pickers, Instant);
+type Rows<'a> = (&'a PlayerPanel, Instant);
 
 struct Column {
     tab: Tab,
@@ -621,7 +650,7 @@ fn tab_body<'a>(view: View<'a>, tokens: Tokens, tab: Tab, ink: Color, rows: Rows
     match tab {
         Tab::Cover => space().into(),
         Tab::Controls => controls(view, tokens, ink, rows),
-        Tab::Queue => queue_tab(view, tokens, ink),
+        Tab::Queue => queue_tab(rows.0, view, tokens, ink, rows.1),
         Tab::Source => source_tab(view, tokens),
         Tab::Quality => quality_tab(view, tokens, ink),
     }
@@ -662,7 +691,8 @@ fn controls<'a>(view: View<'a>, tokens: Tokens, ink: Color, rows: Rows<'a>) -> E
         tile(tokens, Icon::SlidersHorizontal, view.i18n.t("ui.equalizerTitle"), false, None),
     ]
     .spacing(8);
-    let (pickers, now) = rows;
+    let (panel, now) = rows;
+    let pickers = &panel.pickers;
     let look = mode_picker::Look {
         i18n: view.i18n,
         tokens,
@@ -733,7 +763,13 @@ fn controls<'a>(view: View<'a>, tokens: Tokens, ink: Color, rows: Rows<'a>) -> E
     column.push(background).push(transparent).push(hairline(tokens)).push(sources).push(name_row).into()
 }
 
-fn queue_tab<'a>(view: View<'a>, tokens: Tokens, ink: Color) -> Element<'a, Message> {
+fn queue_tab<'a>(
+    panel: &'a PlayerPanel,
+    view: View<'a>,
+    tokens: Tokens,
+    ink: Color,
+    now: Instant,
+) -> Element<'a, Message> {
     if view.queue.is_empty() {
         return text(view.i18n.t("queue.empty")).size(13).color(Color { a: ink.a, ..tokens.t2 }).into();
     }
@@ -758,97 +794,10 @@ fn queue_tab<'a>(view: View<'a>, tokens: Tokens, ink: Color) -> Element<'a, Mess
     .spacing(6)
     .align_y(Alignment::Center)
     .height(Length::Fixed(36.0));
-    let rows = view.queue.iter().enumerate().map(|(index, track)| queue_row(view, tokens, ink, index, track));
-    column![head, column(rows).spacing(0)].spacing(0).into()
-}
-
-fn queue_row<'a>(view: View<'a>, tokens: Tokens, ink: Color, index: usize, track: &'a Track) -> Element<'a, Message> {
-    let active = view.index == Some(index);
-    let hot = view.hover == Some(index);
-    let open = ink.a;
-    let artist = track.artist.as_deref().unwrap_or("");
-    let title = text(track.title.as_str())
-        .size(13)
-        .line_height(LineHeight::Absolute(iced::Pixels(19.0)))
-        .color(ink)
-        .font(if active { settings_kit::SEMIBOLD } else { iced::Font::DEFAULT });
-    let info = column![
-        title,
-        text(artist).size(12).line_height(LineHeight::Absolute(iced::Pixels(17.0))).color(fade(tokens.t3, open))
-    ]
-    .width(Length::Fill);
-    let jump = button(info)
-        .padding(0)
-        .width(Length::Fill)
-        .on_press(Message::Jump(index))
-        .style(|_theme: &IcedTheme, _status| button::Style::default());
-    let actions = row![
-        icon_btn(
-            Icon::ListPlus,
-            15.0,
-            28.0,
-            ink,
-            None,
-            view.i18n.t("queue.playNext").to_owned(),
-            Some(Message::MoveNext(index))
-        ),
-        icon_btn(
-            Icon::ListEnd,
-            15.0,
-            28.0,
-            ink,
-            None,
-            view.i18n.t("queue.moveToEnd").to_owned(),
-            Some(Message::MoveEnd(index))
-        ),
-        icon_btn(
-            Icon::Trash,
-            15.0,
-            28.0,
-            ink,
-            None,
-            view.i18n.t("queue.remove").to_owned(),
-            Some(Message::Remove(index))
-        ),
-    ]
-    .spacing(2);
-    let actions = container(actions).width(if hot { Length::Shrink } else { Length::Fixed(0.0) }).padding(pad(
-        0.0,
-        0.0,
-        0.0,
-        if hot { 8.0 } else { 0.0 },
-    ));
-    // The 3px mark sits in the 12px left padding (`absolute left-0 w-[3px]`). Every row keeps the slot,
-    // so the playing row is not wider than the others.
-    let mark =
-        container(space()).width(Length::Fixed(3.0)).height(Length::Fixed(20.0)).style(move |_theme: &IcedTheme| {
-            container::Style {
-                background: active.then_some(tokens.accent.into()),
-                border: Border {
-                    radius: iced::border::Radius {
-                        top_right: 2.0,
-                        bottom_right: 2.0,
-                        ..iced::border::Radius::default()
-                    },
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            }
-        });
-    let body = row![mark, space().width(Length::Fixed(9.0)), jump, actions]
-        .spacing(0)
-        .align_y(Alignment::Center)
-        .height(Length::Fixed(48.0))
-        .padding(pad(0.0, 6.0, 0.0, 0.0));
-    let row = mouse_area(body).on_enter(Message::Hover(Some(index))).on_exit(Message::Hover(None));
-    container(row)
-        .width(Length::Fill)
-        .style(move |_theme: &IcedTheme| container::Style {
-            background: (active || hot).then_some(Background::Color(tokens.fill)),
-            border: Border { radius: 8.0.into(), ..Border::default() },
-            ..container::Style::default()
-        })
-        .into()
+    let list_h = queue_list_h(view.width, view.height, view.bottom, panel.chrome, view.queue.len());
+    let look = queue_island::Look { i18n: view.i18n, tokens, ink, daylight: view.daylight };
+    let list = panel.queue.view(look, view.queue, view.index, list_h, now).map(Message::Queue);
+    column![head, list].spacing(0).into()
 }
 
 /// `SourceTab`: where the lyrics come from, the timeline offset, online matching and the lyric file, and the gain.
@@ -1297,7 +1246,7 @@ fn measure(tab: Tab, queue_len: usize, inner: f32, max_h: f32) -> (f32, f32, f32
     }
     let body = match tab {
         Tab::Controls => 460.0,
-        Tab::Queue => 36.0 + (queue_len.max(1) as f32 * 48.0).min(336.0),
+        Tab::Queue => 36.0 + queue_island::list_height(queue_len),
         Tab::Source => 210.0,
         Tab::Quality => 110.0,
         Tab::Cover => 0.0,
@@ -1306,6 +1255,19 @@ fn measure(tab: Tab, queue_len: usize, inner: f32, max_h: f32) -> (f32, f32, f32
     let body = if chrome > max_h { (body - (chrome - max_h)).max(48.0) } else { body };
     (48.0, 12.0 + 1.0 + 8.0 + body, cover_px)
 }
+
+/// The queue list's height: what `measure` leaves the queue tab under its 36px head.
+fn queue_list_h(width: f32, height: f32, bottom: f32, chrome: bool, len: usize) -> f32 {
+    let under = if chrome { HANDLE_ROOM } else { BARE_GAP };
+    let panel_w = (width - 32.0).clamp(200.0, 360.0);
+    let inner = (panel_w - 24.0).max(96.0);
+    let max_h = (height - under - bottom - TOP_MARGIN).max(220.0);
+    let (_, body, _) = measure(Tab::Queue, len, inner, max_h);
+    (body - 21.0 - 36.0).max(ROW_MIN)
+}
+
+/// The list never folds under one row.
+const ROW_MIN: f32 = queue_island::ROW;
 
 fn tokens_of(view: &View<'_>) -> Tokens {
     let mut tokens = Tokens::new(view.theme, view.daylight);

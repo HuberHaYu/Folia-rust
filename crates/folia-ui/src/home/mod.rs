@@ -85,6 +85,8 @@ pub enum Message {
     EnqueueAll,
     Query(String),
     OpenList,
+    /// 「过滤当前页」 on the album poster.
+    OpenFilter,
     ListScrolled(f32),
     LocateRow(usize),
     PlayRow(usize),
@@ -195,6 +197,7 @@ impl HomeChrome {
             | Message::PlayAll
             | Message::EnqueueAll
             | Message::OpenList
+            | Message::OpenFilter
             | Message::ToggleSubscribe
             | Message::ReloadCollection => {
                 self.set_menu(now, false);
@@ -232,9 +235,11 @@ impl HomeChrome {
 
     /// Opens the full info strip for a collection layer (`BRAVAIS_SEAM_FULL_WIDTH`), its list panel
     /// (`min(BRAVAIS_PANEL_MAX_WIDTH, viewport − 52)`), or narrows back to the home seam.
-    pub fn set_collection(&mut self, collection: bool, list: bool, now: Instant) {
+    /// An album poster is `resolvePosterWidth` wide.
+    pub fn set_collection(&mut self, collection: bool, list: bool, poster: bool, now: Instant) {
         let full = match (collection, list) {
             (false, _) => (NARROW, ROW_NARROW),
+            (true, false) if poster => (crate::poster::width(self.seen_width), ROW_FULL),
             (true, false) => (FULL, ROW_FULL),
             (true, true) => (PANEL.min(self.seen_width - 52.0).max(FULL.min(self.seen_width)), ROW_FULL),
         };
@@ -498,6 +503,8 @@ pub struct Host<'a> {
     pub account: Option<AccountSlot<'a>>,
     /// The open collection's title and count line; `None` on the home layer.
     pub layer: Option<LayerSeam>,
+    /// The album poster's ground, drawn once for a size and palette.
+    pub poster_ground: Option<&'a iced::widget::canvas::Cache>,
     /// The list row under the pointer.
     pub list_hover: Option<usize>,
 }
@@ -520,6 +527,30 @@ pub struct LayerSeam {
     pub rows: Vec<ListRow>,
     pub menu: bool,
     pub playable: bool,
+    /// An album at the full level shows as a poster (`BravaisSeamAlbumPoster`).
+    pub album: Option<AlbumSeam>,
+}
+
+/// The collection's filter input, focused when the poster's 「过滤当前页」 opens it (`openBravaisFilter`).
+pub fn filter_id() -> iced::widget::Id {
+    iced::widget::Id::new("bravais-collection-filter")
+}
+
+/// What the album poster shows (`projectBravaisSeamAlbum`).
+#[derive(Debug, Clone)]
+pub struct AlbumSeam {
+    pub palette: crate::poster::Palette,
+    pub composition: crate::poster::Composition,
+    pub cover: Option<iced::widget::image::Handle>,
+    /// 「专辑 · 年份」.
+    pub kicker: String,
+    pub artists: String,
+    pub facts: Vec<String>,
+    pub description: Option<String>,
+    /// The watermark: the hero word's last character, else the title's.
+    pub ghost: String,
+    pub words: Vec<(String, bool)>,
+    pub columns: f32,
 }
 
 /// One row of the song list (`BravaisListPanel`): number, title over artist, length.

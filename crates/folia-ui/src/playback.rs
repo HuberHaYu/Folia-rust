@@ -52,6 +52,8 @@ pub enum Message {
     MoveNext(usize),
     /// Moves the queue item at `index` to the end of the queue.
     MoveEnd(usize),
+    /// Moves the queue item at the first index so that it ends up at the second (a drag in the queue list).
+    Reorder(usize, usize),
     Tick,
     LyricsLoaded(i64, Option<Lyrics>),
     AudioReady(i64, Result<PathBuf, String>),
@@ -232,6 +234,10 @@ impl Playback {
             }
             Message::MoveEnd(index) => {
                 self.queue.move_to_end(index);
+                Task::none()
+            }
+            Message::Reorder(from, to) => {
+                self.queue.move_to(from, to);
                 Task::none()
             }
             Message::Tick => self.tick(),

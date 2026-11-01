@@ -151,6 +151,8 @@ pub struct CollectionDetail {
     pub subscribed: Option<bool>,
     /// The playlist creator's user id: an account cannot save its own playlist.
     pub owner: Option<String>,
+    /// An album's release time, milliseconds since the Unix epoch (`publishedAt`).
+    pub published: Option<i64>,
 }
 
 /// The radio tab: personal FM, the daily songs and the recommended playlists (`getHomeFeed`).

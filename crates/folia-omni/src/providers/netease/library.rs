@@ -43,7 +43,8 @@ pub async fn collection_detail(client: &Client, collection: &Collection) -> Resu
             // `album_detail_dynamic`: whether the account saved it.
             let state = client.post("/api/album/detail/dynamic", object(json!({ "id": id }))).await?;
             let subscribed = state.body.get("isSub").and_then(Value::as_bool);
-            Ok(CollectionDetail { tracks: tracks(answer.body.get("songs")), subscribed, owner: None })
+            let published = answer.body.pointer("/album/publishTime").and_then(Value::as_i64).filter(|time| *time > 0);
+            Ok(CollectionDetail { tracks: tracks(answer.body.get("songs")), subscribed, owner: None, published })
         }
         CollectionKind::DailySongs => {
             Ok(CollectionDetail { tracks: daily_songs(client).await?, ..CollectionDetail::default() })
@@ -89,7 +90,7 @@ async fn playlist_detail(client: &Client, id: &str) -> Result<CollectionDetail, 
         eapi::check(&answer.body)?;
         songs.extend(tracks(answer.body.get("songs")));
     }
-    Ok(CollectionDetail { tracks: songs, subscribed: Some(subscribed.unwrap_or(false)), owner })
+    Ok(CollectionDetail { tracks: songs, subscribed: Some(subscribed.unwrap_or(false)), owner, published: None })
 }
 
 /// `album_sublist`, every page.

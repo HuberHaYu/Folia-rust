@@ -20,7 +20,13 @@ pub fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) ->
 
 /// An online cover: downloaded through the facade, then decoded `px` square on a worker thread; failures are logged.
 pub async fn online_cover(omni: Omni, url: String, px: u32) -> Option<Cover> {
-    let path = match omni.fetch_cover(&url, px).await {
+    online_cover_sized(omni, url, px, px).await
+}
+
+/// Downloads the cover at `fetch_px` and decodes it to `decode_px` square.
+pub async fn online_cover_sized(omni: Omni, url: String, fetch_px: u32, decode_px: u32) -> Option<Cover> {
+    let px = decode_px;
+    let path = match omni.fetch_cover(&url, fetch_px).await {
         Ok(path) => path,
         Err(err) => {
             tracing::warn!(error = &err as &dyn std::error::Error, "online cover not downloaded");

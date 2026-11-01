@@ -142,6 +142,22 @@ impl<T> Queue<T> {
         true
     }
 
+    /// Moves the item at `from` so that it ends up at `to` (`moveQueueSong`); the current item stays current.
+    pub fn move_to(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.items.len() || to >= self.items.len() || from == to {
+            return false;
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        self.current = self.current.map(|current| match current {
+            current if current == from => to,
+            current if from < current && current <= to => current - 1,
+            current if to <= current && current < from => current + 1,
+            current => current,
+        });
+        true
+    }
+
     /// Moves `index` to the end of the queue.
     pub fn move_to_end(&mut self, index: usize) -> bool {
         if index >= self.items.len() {

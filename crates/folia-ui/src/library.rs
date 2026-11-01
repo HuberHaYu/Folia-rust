@@ -67,10 +67,32 @@ pub struct Layer {
     /// The ⋯ more menu is open.
     pub menu: bool,
     pub list_hover: Option<usize>,
+    /// The album poster's cover (512px), colours from the cover, release time and composition.
+    pub poster: Option<Poster>,
+    /// 「过滤当前页」 was pressed on the poster: the seam shows the filter instead (`openBravaisFilter`).
+    pub filter_open: bool,
+}
+
+/// What the album poster draws besides the collection itself.
+pub struct Poster {
+    pub cover: Option<iced::widget::image::Handle>,
+    pub palette: Option<crate::poster::Palette>,
+    pub published: Option<i64>,
+    pub composition: crate::poster::Composition,
+    /// The ground drawn once for a size and palette.
+    pub ground: iced::widget::canvas::Cache,
 }
 
 impl Layer {
     fn new(collection: Collection, tracks: Feed<Vec<Track>>) -> Self {
+        // The layer key the composition is drawn from (`resolveAlbumComposition(layer.key)`).
+        let poster = (collection.kind == CollectionKind::Album).then(|| Poster {
+            cover: None,
+            palette: None,
+            published: None,
+            composition: crate::poster::composition(&format!("collection:{}:{}", collection.provider, collection.id)),
+            ground: iced::widget::canvas::Cache::new(),
+        });
         Self {
             collection,
             tracks,
@@ -83,7 +105,14 @@ impl Layer {
             list_offset: 0.0,
             menu: false,
             list_hover: None,
+            poster,
+            filter_open: false,
         }
+    }
+
+    /// `poster && level === 'full' && !filterOpen`: the list panel and the filter take the poster's place.
+    pub fn shows_poster(&self) -> bool {
+        self.poster.is_some() && !self.list && !self.filter_open && self.query.is_empty()
     }
 
     /// `contextTracks`: the songs the filter keeps, or all of them, by index into `tracks`.
@@ -180,6 +209,11 @@ pub enum Message {
     Tab(HomeTab),
     Online(online::Message),
     Opened(String, Result<folia_omni::CollectionDetail, String>),
+    /// The album poster's cover at 512px, and the colours read from it at 128px.
+    PosterCover(String, Option<iced::widget::image::Handle>),
+    PosterPalette(String, Option<crate::poster::Palette>),
+    /// 「过滤当前页」 on the poster.
+    OpenFilter,
     Back,
     PlayAll,
     EnqueueAll,
@@ -310,7 +344,16 @@ impl LibraryPage {
 
     pub fn set_tab_chrome(&self, home: &mut crate::home::HomeChrome, now: Instant) {
         let list = self.layer.as_ref().is_some_and(|layer| layer.list);
-        home.set_collection(self.layer.is_some(), list, now);
+        let poster = self.layer.as_ref().is_some_and(Layer::shows_poster);
+        home.set_collection(self.layer.is_some(), list, poster, now);
+    }
+
+    pub fn poster_ground(&self) -> Option<&iced::widget::canvas::Cache> {
+        self.layer
+            .as_ref()
+            .filter(|layer| layer.shows_poster())
+            .and_then(|layer| layer.poster.as_ref())
+            .map(|poster| &poster.ground)
     }
 
     /// After a confirmed sign-in, keeps the session and reads the account.
@@ -394,6 +437,9 @@ impl LibraryPage {
                 };
                 layer.tracks = match result {
                     Ok(detail) => {
+                        if let Some(poster) = layer.poster.as_mut() {
+                            poster.published = detail.published;
+                        }
                         layer.subscribed = detail.subscribed;
                         layer.owner = detail.owner;
                         Feed::Ready(detail.tracks)
@@ -410,6 +456,36 @@ impl LibraryPage {
                     None => Task::none(),
                 };
                 (Task::batch([rebuilt, located]), None)
+            }
+            Message::PosterCover(id, cover) => {
+                if let Some(poster) = self
+                    .layer
+                    .as_mut()
+                    .filter(|layer| layer.collection.id == id)
+                    .and_then(|layer| layer.poster.as_mut())
+                {
+                    poster.cover = cover;
+                }
+                (Task::none(), None)
+            }
+            Message::PosterPalette(id, palette) => {
+                if let Some(poster) = self
+                    .layer
+                    .as_mut()
+                    .filter(|layer| layer.collection.id == id)
+                    .and_then(|layer| layer.poster.as_mut())
+                {
+                    poster.palette = palette;
+                    poster.ground.clear();
+                }
+                (Task::none(), None)
+            }
+            Message::OpenFilter => {
+                if let Some(layer) = self.layer.as_mut() {
+                    layer.filter_open = true;
+                    layer.menu = false;
+                }
+                (iced::widget::operation::focus(crate::home::filter_id()), None)
             }
             Message::Back => {
                 if let Some(layer) = self.layer.as_mut().filter(|layer| layer.list) {
@@ -574,8 +650,37 @@ impl LibraryPage {
             (None, None) => Task::none(),
         };
         let tracks = daily.map_or(Feed::Loading, Feed::Ready);
+        let art = match (collection.kind, collection.cover_url.clone(), self.online.omni().cloned()) {
+            (CollectionKind::Album, Some(url), Some(omni)) => {
+                let id = collection.id.clone();
+                let (sample_omni, sample_url, sample_id) = (omni.clone(), url.clone(), id.clone());
+                // `BRAVAIS_ALBUM_COVER_PX`; the colours are read at `SAMPLE_COVER_PX` drawn 50px wide (`loadImagePixels`).
+                let cover = Task::perform(crate::background::online_cover(omni, url, 512), move |cover| {
+                    let handle = cover
+                        .map(|cover| iced::widget::image::Handle::from_rgba(cover.width, cover.height, cover.rgba));
+                    Message::PosterCover(id.clone(), handle)
+                });
+                let palette = Task::perform(
+                    async move {
+                        let sample = crate::background::online_cover_sized(sample_omni, sample_url, 128, 50).await?;
+                        // `ALBUM_SAMPLE_COLORS`: two for the cover's own pair, five to choose the accent from.
+                        let pair = crate::poster::representative(&sample.rgba, 2);
+                        let lead = crate::poster::representative(&sample.rgba, 5);
+                        let colors: Vec<_> = pair
+                            .iter()
+                            .copied()
+                            .chain(lead.into_iter().filter(|color| !pair.contains(color)))
+                            .collect();
+                        crate::poster::album_palette(&colors)
+                    },
+                    move |palette| Message::PosterPalette(sample_id.clone(), palette),
+                );
+                Task::batch([cover, palette])
+            }
+            _ => Task::none(),
+        };
         self.layer = Some(Layer::new(collection, tracks));
-        Task::batch([fetch, self.rebuild(i18n)])
+        Task::batch([fetch, art, self.rebuild(i18n)])
     }
 
     /// Builds the tiles of the current layer or tab and lays them on the wall.
@@ -814,6 +919,26 @@ impl LibraryPage {
             rows,
             menu: layer.menu,
             playable: !context.is_empty(),
+            album: layer.poster.as_ref().filter(|_| layer.shows_poster()).map(|poster| {
+                let year = poster.published.map(crate::poster::year_of);
+                let kind = i18n.t(kind_label(CollectionKind::Album));
+                let words = crate::poster::hero_split(&layer.collection.name);
+                let hero = words.iter().find(|(_, hero)| *hero).map(|(text, _)| text.as_str());
+                let ghost = hero.unwrap_or(&layer.collection.name).chars().last().map(String::from).unwrap_or_default();
+                crate::home::AlbumSeam {
+                    palette: poster.palette.unwrap_or(crate::poster::FALLBACK),
+                    composition: poster.composition,
+                    cover: poster.cover.clone(),
+                    kicker: year.map_or_else(|| kind.to_owned(), |year| format!("{kind} · {year}")),
+                    artists: layer.collection.creator.clone().unwrap_or_default(),
+                    // NetEase gives an album no length or genre: its facts are the count alone.
+                    facts: (total > 0).then(|| track_count(i18n, total as u32)).into_iter().collect(),
+                    description: layer.collection.description.clone().filter(|text| !text.trim().is_empty()),
+                    ghost,
+                    columns: crate::poster::title_columns(&layer.collection.name),
+                    words,
+                }
+            }),
         })
     }
 
