@@ -4,6 +4,8 @@
 mod kugou;
 #[cfg(feature = "netease")]
 mod netease;
+#[cfg(feature = "qq")]
+mod qq;
 
 use crate::Provider;
 
@@ -13,5 +15,7 @@ pub fn all(http: &reqwest::Client) -> Vec<Box<dyn Provider>> {
         Box::new(netease::Netease::new(http.clone())),
         #[cfg(feature = "kugou")]
         Box::new(kugou::Kugou::new(http.clone())),
+        #[cfg(feature = "qq")]
+        Box::new(qq::Qq::new(http.clone())),
     ]
 }
