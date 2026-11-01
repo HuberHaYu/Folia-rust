@@ -36,6 +36,8 @@ pub enum OmniError {
     Unsupported(&'static str),
     #[error("cannot draw the sign-in code")]
     Qr(#[from] qrcode::types::QrError),
+    #[error("cannot read the sign-in code picture: {0}")]
+    QrImage(String),
     #[error("system keyring refused")]
     Keyring(#[from] keyring::Error),
     #[error("cannot write {path}")]
@@ -85,11 +87,19 @@ const PLATFORMS: [(&str, &str, &str, char, u32); 7] = [
     ("qishui", "汽水音乐", "汽水", '汽', 0x19a58c),
 ];
 
-/// A QR sign-in session: `key` is what the platform is asked about, `url` what the phone scans.
+/// A QR sign-in session: `key` is what the platform is asked about, `content` what the phone scans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginCode {
     pub key: String,
-    pub url: String,
+    pub content: QrContent,
+}
+
+/// What a sign-in code holds: an address to encode, or the platform's own picture of the code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QrContent {
+    Url(String),
+    /// A PNG of the code as the platform drew it; its modules are read back from the picture.
+    Png(Vec<u8>),
 }
 
 /// What the platform says about a sign-in code.
@@ -282,7 +292,10 @@ impl Omni {
     /// Asks for a sign-in code and draws it as a QR matrix.
     pub async fn login_qr(&self, provider: &str) -> Result<LoginQr, OmniError> {
         let code = self.provider(provider)?.login_code().await?;
-        LoginQr::encode(code.key, &code.url)
+        match code.content {
+            QrContent::Url(url) => LoginQr::encode(code.key, &url),
+            QrContent::Png(png) => LoginQr::from_png(code.key, &png),
+        }
     }
 
     pub async fn check_login(&self, provider: &str, key: &str) -> Result<LoginState, OmniError> {

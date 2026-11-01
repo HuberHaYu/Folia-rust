@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::gateway::{self, APPID, Client, Request, SRCAPPID, Sign};
 use super::{cover_of, data_of, text_of};
-use crate::{Account, LoginCode, LoginState, OmniError};
+use crate::{Account, LoginCode, LoginState, OmniError, QrContent};
 
 /// `login_qr_key` with the default type: the lite client's app id 1001.
 pub async fn login_code(client: &Client) -> Result<LoginCode, OmniError> {
@@ -26,7 +26,7 @@ pub async fn login_code(client: &Client) -> Result<LoginCode, OmniError> {
         .ok_or_else(|| OmniError::Response("no QR key".to_owned()))?;
     // `login_qr_create`.
     let url = format!("https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode={key}");
-    Ok(LoginCode { key, url })
+    Ok(LoginCode { key, content: QrContent::Url(url) })
 }
 
 /// `login_qr_check`: 0 expired, 1 waiting, 2 and 3 scanned, 4 confirmed with the token and the user id.

@@ -1404,6 +1404,7 @@ dependencies = [
  "flate2",
  "folia-core",
  "folia-lyrics",
+ "image",
  "keyring",
  "md-5",
  "num-bigint",

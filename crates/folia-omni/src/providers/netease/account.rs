@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 
 use super::eapi::{self, Client, Session};
-use crate::{Account, LoginCode, LoginState, OmniError};
+use crate::{Account, LoginCode, LoginState, OmniError, QrContent};
 
 /// `login_qr_key`: a key for a new code (`type: 3`, the desktop client's).
 pub async fn login_code(client: &Client) -> Result<LoginCode, OmniError> {
@@ -21,7 +21,7 @@ pub async fn login_code(client: &Client) -> Result<LoginCode, OmniError> {
     let device = client.session().device_id;
     let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let url = format!("https://music.163.com/login?codekey={key}&chainId=v1_{device}_web_login_{millis}");
-    Ok(LoginCode { key, url })
+    Ok(LoginCode { key, content: QrContent::Url(url) })
 }
 
 /// `login_qr_check`. On 803 the answer's cookies become the session.
