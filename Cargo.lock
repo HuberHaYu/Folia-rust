@@ -1400,10 +1400,13 @@ name = "folia-omni"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
+ "base64 0.23.1",
+ "flate2",
  "folia-core",
  "folia-lyrics",
  "keyring",
  "md-5",
+ "num-bigint",
  "qrcode",
  "reqwest",
  "serde",
