@@ -146,6 +146,10 @@ impl Provider for Bodian {
         Box::pin(library::radio_feed(&self.client, limit))
     }
 
+    fn has_daily_songs(&self) -> bool {
+        false
+    }
+
     /// The original's Bodian provider has no explore page.
     fn explore(&self) -> BoxFuture<'_, Result<Vec<ExploreSection>, OmniError>> {
         Box::pin(async { Err(OmniError::Unsupported("the explore page")) })

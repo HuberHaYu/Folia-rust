@@ -1168,7 +1168,9 @@ impl LibraryPage {
             }
             HomeTab::Radio => {
                 if let Some(feed) = self.online.radio.ready() {
-                    for collection in radio_cards(feed, self.online.provider(), i18n) {
+                    let provider = self.online.provider();
+                    let daily = self.online.omni().is_none_or(|omni| omni.has_daily_songs(provider));
+                    for collection in radio_cards(feed, provider, daily, i18n) {
                         let description = radio_description(&collection, i18n);
                         card(&collection, description, &mut tiles, &mut actions);
                     }
@@ -1545,7 +1547,7 @@ fn section_summary(section: &folia_omni::ExploreSection, i18n: &I18n) -> String 
 }
 
 /// `buildOnlineRadioCards`: personal FM and the daily songs before the recommended playlists.
-fn radio_cards(feed: &folia_omni::RadioFeed, provider: &str, i18n: &I18n) -> Vec<Collection> {
+fn radio_cards(feed: &folia_omni::RadioFeed, provider: &str, daily: bool, i18n: &I18n) -> Vec<Collection> {
     let mut cards = Vec::new();
     let provider = provider.to_owned();
     if !feed.personal_fm.is_empty() {
@@ -1560,6 +1562,10 @@ fn radio_cards(feed: &folia_omni::RadioFeed, provider: &str, i18n: &I18n) -> Vec
             // `personalFmModeLabel`: NetEase has FM modes, and the mode in use is the default one.
             description: Some(i18n.t("personalFmMode.mode.DEFAULT").to_owned()),
         });
+    }
+    if !daily {
+        cards.extend(feed.recommended.iter().cloned());
+        return cards;
     }
     cards.push(Collection {
         provider,

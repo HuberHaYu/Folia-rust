@@ -249,6 +249,10 @@ pub trait Provider: Send + Sync {
     ) -> BoxFuture<'a, Result<(), OmniError>>;
     fn favorite_albums(&self) -> BoxFuture<'_, Result<Vec<Collection>, OmniError>>;
     fn radio_feed(&self, limit: u32) -> BoxFuture<'_, Result<RadioFeed, OmniError>>;
+    /// Whether the platform has daily songs at all (`supportsDailySongs`); the radio tab shows no card otherwise.
+    fn has_daily_songs(&self) -> bool {
+        true
+    }
     fn explore(&self) -> BoxFuture<'_, Result<Vec<ExploreSection>, OmniError>>;
     /// The address of `url` resized to `px` square on the platform's image CDN, when `url` is on it.
     fn sized_cover(&self, url: &str, px: u32) -> Option<String>;
@@ -369,6 +373,10 @@ impl Omni {
 
     pub async fn radio_feed(&self, provider: &str, limit: u32) -> Result<RadioFeed, OmniError> {
         self.provider(provider)?.radio_feed(limit).await
+    }
+
+    pub fn has_daily_songs(&self, provider: &str) -> bool {
+        self.provider(provider).is_ok_and(|found| found.has_daily_songs())
     }
 
     pub async fn explore(&self, provider: &str) -> Result<Vec<ExploreSection>, OmniError> {

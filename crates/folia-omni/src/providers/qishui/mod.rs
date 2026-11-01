@@ -119,6 +119,10 @@ impl Provider for Qishui {
         Box::pin(library::radio_feed(&self.client, &self.feed, limit))
     }
 
+    fn has_daily_songs(&self) -> bool {
+        false
+    }
+
     fn explore(&self) -> BoxFuture<'_, Result<Vec<ExploreSection>, OmniError>> {
         Box::pin(library::explore(&self.client, &self.feed))
     }
