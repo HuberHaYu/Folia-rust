@@ -12,6 +12,8 @@ mod qishui;
 mod qq;
 #[cfg(feature = "spotify")]
 mod spotify;
+#[cfg(feature = "ytm")]
+mod ytm;
 
 use crate::Provider;
 
@@ -25,6 +27,8 @@ pub fn all(http: &reqwest::Client) -> Vec<Box<dyn Provider>> {
         Box::new(qq::Qq::new(http.clone())),
         #[cfg(feature = "bodian")]
         Box::new(bodian::Bodian::new(http.clone())),
+        #[cfg(feature = "ytm")]
+        Box::new(ytm::Ytm::new(http.clone())),
         #[cfg(feature = "qishui")]
         Box::new(qishui::Qishui::new(http.clone())),
         #[cfg(feature = "spotify")]

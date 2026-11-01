@@ -7,13 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["netease", "kugou", "qq", "bodian", "qishui", "spotify"]
+default = ["netease", "kugou", "qq", "bodian", "qishui", "spotify", "ytm"]
 netease = []
 kugou = ["dep:flate2", "dep:num-bigint"]
 qq = ["dep:flate2", "dep:num-bigint"]
 bodian = []
 qishui = ["dep:ring"]
 spotify = ["dep:ring", "dep:librespot-audio", "dep:librespot-core", "dep:librespot-metadata"]
+ytm = []
 
 [dependencies]
 folia-core.workspace = true
