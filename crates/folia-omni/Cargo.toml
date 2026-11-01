@@ -7,10 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["netease", "kugou", "qq"]
+default = ["netease", "kugou", "qq", "bodian"]
 netease = []
 kugou = ["dep:flate2", "dep:num-bigint"]
 qq = ["dep:flate2", "dep:num-bigint"]
+bodian = []
 
 [dependencies]
 folia-core.workspace = true

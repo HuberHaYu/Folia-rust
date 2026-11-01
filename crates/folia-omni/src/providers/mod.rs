@@ -1,5 +1,7 @@
 // Registry of the platform providers compiled in; each platform is a cargo feature named after its id.
 
+#[cfg(feature = "bodian")]
+mod bodian;
 #[cfg(feature = "kugou")]
 mod kugou;
 #[cfg(feature = "netease")]
@@ -17,5 +19,7 @@ pub fn all(http: &reqwest::Client) -> Vec<Box<dyn Provider>> {
         Box::new(kugou::Kugou::new(http.clone())),
         #[cfg(feature = "qq")]
         Box::new(qq::Qq::new(http.clone())),
+        #[cfg(feature = "bodian")]
+        Box::new(bodian::Bodian::new(http.clone())),
     ]
 }
