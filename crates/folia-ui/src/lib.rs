@@ -21,13 +21,14 @@ mod track_list;
 mod wall;
 
 pub use background::{error_chain, format_time};
+pub use home::{default_level_is_spine, seam_safe_bottom};
 pub use overlay::{
     CAPSULE_COLLAPSE_MS, CAPSULE_EXPAND_MS, CAPSULE_FADE_MS, CAPSULE_SETTLE_MS, CHROME_HOLD_MS, CHROME_LEAVE_MS,
     CapsuleHover, CapsuleSpring, ChromeClock, GLOW_BLUR_PX, GlowEllipse, Subtitle, capsule_open, capsule_row,
     capsule_width, glow_coverage, glow_ellipse, row_gap, subtitle_at, subtitle_line_width, translation_px,
     upcoming_look, upcoming_px,
 };
-pub use wall::{SEAM_ANCHOR, Seam, camera_range_x, seam_geometry};
+pub use wall::{SEAM_ANCHOR, Seam, content_opacity, plan_opening, seam_geometry, seam_on_axis, wider_span};
 
 use std::path::PathBuf;
 
@@ -215,7 +216,17 @@ impl Shell {
             self.positioning = None;
         }
         self.bar.set_home(self.page == Page::Library);
+        self.home.sync(self.window_size.width, self.window_size.height, self.playback.current().is_some(), now);
+        if let Some(horizontal) = self.home.take_flip(now) {
+            self.library.set_horizontal(horizontal);
+            self.library.replan(self.home.goal());
+        }
+        self.library.set_horizontal(self.home.is_horizontal());
         self.library.set_seam(self.home.width(now));
+        self.library.plan_if_needed();
+        let seam = self.library.seam();
+        self.home.sync_tab(self.home.is_hidden() || seam.collapsed, now);
+        self.library.sync_hint(now);
         self.bar.set_forced(self.positioning.is_some());
         self.bar.sync(&self.playback, self.window_size.width, now);
         self.bar.set_shown(self.chrome_visible(), now);
@@ -729,8 +740,10 @@ impl Shell {
         if self.titlebar.animating(now) {
             parts.push(iced::window::frames().map(|_| Message::Chrome(chrome::Message::Frame)));
         }
-        if self.page == Page::Library && self.home.animating(now) {
-            parts.push(iced::window::frames().map(|_| Message::Home(home::Message::Frame)));
+        if self.page == Page::Library
+            && (self.home.animating(now) || self.library.coasting() || self.library.hint_busy(now))
+        {
+            parts.push(iced::window::frames().map(|_| Message::Library(library::Message::Frame)));
         }
         if self.page == Page::NowPlaying && self.panel.animating(now) {
             parts.push(iced::window::frames().map(|_| Message::Panel(panel::Message::Frame)));
@@ -793,7 +806,19 @@ impl Shell {
             muted: self.playback.muted,
             window_width: self.window_size.width,
             window_height: self.window_size.height,
-            seam: self.library.seam(self.window_size.width),
+            seam: self.library.seam(),
+            spine: self.home.is_spine(),
+            horizontal: self.home.is_horizontal(),
+            opacity: content_opacity(self.library.seam().width, self.home.goal().max(1.0)),
+            bottom: if self.home.is_horizontal() {
+                0.0
+            } else {
+                home::seam_safe_bottom(self.bar_offset(), self.home.presence(std::time::Instant::now()))
+            },
+            status: self.library.status(&self.i18n),
+            show_tab: self.home.is_hidden() || self.library.seam().collapsed,
+            tab_hidden: self.home.is_hidden(),
+            tab: self.home.tab(std::time::Instant::now()),
         }
     }
 
@@ -902,7 +927,11 @@ impl Shell {
     }
 
     fn home(&mut self, message: home::Message) -> Task<Message> {
+        let reopen = matches!(message, home::Message::Tab) && !self.home.is_hidden();
         self.home.update(&message);
+        if reopen {
+            self.library.replan(self.home.goal());
+        }
         match message {
             home::Message::Search => {
                 self.page = Page::Search;
@@ -939,6 +968,8 @@ impl Shell {
             }
             home::Message::Dismiss
             | home::Message::Fold
+            | home::Message::Expand
+            | home::Message::Tab
             | home::Message::More
             | home::Message::Tools
             | home::Message::BackHover(_)

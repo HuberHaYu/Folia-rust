@@ -3,6 +3,7 @@ name = "Folia"
 
 [options]
 save = "保存"
+refresh = "刷新"
 playerBottomBarPositioningHint = "拖动控制条设置高度"
 playerBottomBarRepositionUnavailable = "先播放一首歌 —— 控制条要在屏幕上才能拖动"
 playerBottomBarReposition = "在播放页拖动调整"
@@ -131,6 +132,8 @@ sourceNetease = "网易云"
 homeTitle = "书库"
 seamFold = "折叠"
 seamExpand = "展开"
+seamRestore = "展开信息条"
+seamReopenHere = "在这里裂开"
 
 [libraryBravaisHome]
 search = "搜索"
@@ -138,6 +141,10 @@ searchSubmit = "搜索"
 settings = "设置"
 more = "更多"
 backToPlayer = "回到播放页"
+
+[libraryBravaisHome.wallHint]
+localTitle = "还没有导入本地音乐"
+localBody = "在信息条的「⋯」里选「{{action}}」，文件夹、专辑和歌手会铺满这面墙。"
 
 [wallTools]
 queue = "播放队列"

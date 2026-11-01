@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use folia_core::{Rgb, Theme, Track};
 use folia_library::{Cover, CoverCache};
@@ -131,7 +132,11 @@ impl Typeset {
 pub enum Message {
     Viewport(Size),
     Pan(Vector),
-    Settled,
+    /// A released drag. `velocity` is the pointer in screen px/s; `stale` skips the coast.
+    Settled {
+        velocity: Vector,
+        stale: bool,
+    },
     Play(usize),
     CoversLoaded(Vec<(i64, Option<Cover>)>),
 }
@@ -145,6 +150,19 @@ pub struct Wall {
     covers: CoverCache<i64, Handle>,
     pending: HashSet<i64>,
     seam_open: f32,
+    anchor_x: f32,
+    anchor_y: f32,
+    horizontal: bool,
+    planned: bool,
+    coast: Option<Coast>,
+}
+
+/// Release coast from `wallPanMotion`: amplitude `0.3 × speed`, time constant 280ms.
+struct Coast {
+    origin: Vector,
+    /// Pointer velocity in screen px/s, already capped.
+    velocity: Vector,
+    started: Instant,
 }
 
 impl Wall {
@@ -158,6 +176,11 @@ impl Wall {
             covers: CoverCache::new(COVER_BYTES),
             pending: HashSet::new(),
             seam_open: 0.0,
+            anchor_x: SEAM_ANCHOR,
+            anchor_y: SEAM_ANCHOR,
+            horizontal: false,
+            planned: false,
+            coast: None,
         }
     }
 
@@ -171,6 +194,10 @@ impl Wall {
     pub fn relayout(&mut self, tracks: &[Track]) -> Task<Message> {
         self.placements = place(tracks.len());
         self.pan = Vector::ZERO;
+        self.anchor_x = SEAM_ANCHOR;
+        self.anchor_y = SEAM_ANCHOR;
+        self.planned = false;
+        self.coast = None;
         self.labels.clear();
         self.covers.clear();
         self.show_visible(tracks)
@@ -192,10 +219,8 @@ impl Wall {
                 self.fit_visible(tracks);
                 (Task::none(), None)
             }
-            Message::Settled => {
-                // `clampToCameraRange`: a released wall settles back inside its range.
-                let (min, max) = self.range_x();
-                self.pan.x = self.pan.x.clamp(min, max);
+            Message::Settled { velocity, stale } => {
+                self.release(velocity, stale);
                 (self.show_visible(tracks), None)
             }
             Message::Play(index) => (Task::none(), Some(index)),
@@ -270,17 +295,32 @@ impl Wall {
         let scale = wall_scale(self.viewport.width);
         let push = seam_push(self.seam().width, scale);
         let mut on_screen = to_screen(rect, self.pan, self.viewport, scale);
-        on_screen.x += if rect.center_x() < SEAM_ANCHOR { -push } else { push };
+        let anchor = if self.horizontal { self.anchor_y } else { self.anchor_x };
+        let before = if self.horizontal { rect.center_y() < anchor } else { rect.center_x() < anchor };
+        if self.horizontal {
+            on_screen.y += if before { -push } else { push };
+        } else {
+            on_screen.x += if before { -push } else { push };
+        }
         on_screen
     }
 
-    /// The seam on screen for the opening the home chrome asks for.
-    pub fn seam(&self) -> Seam {
-        self.seam_in(self.viewport.width)
+    pub fn viewport(&self) -> Size {
+        self.viewport
     }
 
-    pub fn seam_in(&self, width: f32) -> Seam {
-        seam_geometry(self.pan.x, self.seam_open, width)
+    /// The seam on screen. A viewport that has not been measured yet reports a closed seam.
+    pub fn seam(&self) -> Seam {
+        let view = self.viewport;
+        if view.width < 1.0 || view.height < 1.0 {
+            return Seam { center: 0.0, width: 0.0, collapsed: false, before: true, horizontal: self.horizontal };
+        }
+        let scale = wall_scale(view.width);
+        if self.horizontal {
+            seam_on_axis(self.anchor_y, self.pan.y, self.seam_open, view.height, view.height / 2.0, scale, true)
+        } else {
+            seam_on_axis(self.anchor_x, self.pan.x, self.seam_open, view.width, view.width / 2.0, scale, false)
+        }
     }
 
     /// The width the seam opens to: the narrow seam or the spine, while it animates.
@@ -288,18 +328,81 @@ impl Wall {
         self.seam_open = width;
     }
 
-    fn range_x(&self) -> (f32, f32) {
-        let left = self.placements.iter().map(|place| place.rect.x).fold(SEAM_ANCHOR, f32::min);
-        let right = self.placements.iter().map(|place| place.rect.x + place.rect.width).fold(SEAM_ANCHOR, f32::max);
-        camera_range_x(left, right, self.seam_open, self.viewport.width)
+    pub fn set_horizontal(&mut self, horizontal: bool) {
+        self.horizontal = horizontal;
     }
 
-    /// `stepCameraAxis` on x: full speed inside the range, a third of it beyond (rubber band).
+    /// Picks a block boundary around the camera for an opening of `open` px, and yields the camera so it fits.
+    pub fn replan(&mut self, open: f32) {
+        let scale = wall_scale(self.viewport.width);
+        if self.horizontal {
+            let block = BLOCK_ROWS as f32 * PITCH;
+            let (anchor, camera) =
+                plan_opening(self.pan.y, open, self.viewport.height, self.viewport.height / 2.0, scale, block);
+            self.anchor_y = anchor;
+            self.pan.y = camera;
+        } else {
+            let block = BLOCK_COLS as f32 * PITCH;
+            let (anchor, camera) =
+                plan_opening(self.pan.x, open, self.viewport.width, self.viewport.width / 2.0, scale, block);
+            self.anchor_x = anchor;
+            self.pan.x = camera;
+        }
+        self.planned = true;
+    }
+
+    /// Plans the first opening once the wall has a viewport and a real width.
+    pub fn plan_if_needed(&mut self) {
+        if self.planned || self.viewport.width < 1.0 || self.seam_open < 1.0 {
+            return;
+        }
+        self.replan(self.seam_open);
+    }
+
+    pub fn coasting(&self) -> bool {
+        self.coast.is_some()
+    }
+
+    /// Steps the release coast. Returns whether the camera moved.
+    pub fn tick_coast(&mut self, now: Instant) -> bool {
+        let Some(coast) = &self.coast else { return false };
+        let (origin, velocity, started) = (coast.origin, coast.velocity, coast.started);
+        let speed = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
+        if speed < 1.0 {
+            self.coast = None;
+            return false;
+        }
+        let t = now.saturating_duration_since(started).as_secs_f32() * 1000.0;
+        let amplitude = speed * COAST_POWER;
+        let remaining = amplitude * (-t / COAST_MS).exp();
+        let distance = amplitude - remaining;
+        let scale = wall_scale(self.viewport.width).max(0.01);
+        let along = Vector::new(-velocity.x / speed, -velocity.y / speed) * (distance / scale);
+        self.pan = origin + along;
+        if remaining < COAST_REST {
+            self.coast = None;
+        }
+        true
+    }
+
+    /// The home wall is infinite, so a drag is not resisted. A new drag cancels the coast.
     fn pan_by(&mut self, delta: Vector) {
-        let (min, max) = self.range_x();
-        let next = self.pan.x + delta.x;
-        self.pan.x = if next < min || next > max { self.pan.x + delta.x * 0.35 } else { next };
-        self.pan.y += delta.y;
+        self.coast = None;
+        self.pan += delta;
+    }
+
+    fn release(&mut self, velocity: Vector, stale: bool) {
+        let speed = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
+        if stale || speed < COAST_MIN {
+            self.coast = None;
+            return;
+        }
+        let capped = speed.min(COAST_MAX);
+        self.coast = Some(Coast {
+            origin: self.pan,
+            velocity: Vector::new(velocity.x * capped / speed, velocity.y * capped / speed),
+            started: Instant::now(),
+        });
     }
 
     pub fn view<'a>(
@@ -326,6 +429,9 @@ pub struct DragState {
     pressed_at: Option<Point>,
     last: Option<Point>,
     dragging: bool,
+    moved_at: Option<Instant>,
+    /// Pointer velocity in screen px/s.
+    velocity: Vector,
 }
 
 impl canvas::Program<Message> for WallProgram<'_> {
@@ -345,20 +451,37 @@ impl canvas::Program<Message> for WallProgram<'_> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let at = cursor.position_in(bounds)?;
-                *state = DragState { pressed_at: Some(at), last: Some(at), dragging: false };
+                *state = DragState {
+                    pressed_at: Some(at),
+                    last: Some(at),
+                    dragging: false,
+                    moved_at: Some(Instant::now()),
+                    velocity: Vector::ZERO,
+                };
                 Some(Action::capture())
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let (from, last) = (state.pressed_at?, state.last?);
                 let at = cursor.position_in(bounds).unwrap_or(last);
                 state.dragging |= from.distance(at) > DRAG_THRESHOLD;
+                let now = Instant::now();
+                if let Some(then) = state.moved_at {
+                    let dt = now.saturating_duration_since(then).as_secs_f32();
+                    if dt > 0.0 {
+                        state.velocity = Vector::new((at.x - last.x) / dt, (at.y - last.y) / dt);
+                    }
+                }
+                state.moved_at = Some(now);
                 state.last = Some(at);
                 state.dragging.then(|| Action::publish(Message::Pan((last - at) * (1.0 / scale))).and_capture())
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 let from = state.pressed_at.take()?;
                 if std::mem::take(&mut state.dragging) {
-                    return Some(Action::publish(Message::Settled));
+                    let stale = state.moved_at.is_none_or(|at| at.elapsed().as_millis() > u128::from(COAST_STALE_MS));
+                    let velocity = state.velocity;
+                    state.velocity = Vector::ZERO;
+                    return Some(Action::publish(Message::Settled { velocity, stale }));
                 }
 
                 let hit = self.wall.visible().find(|p| self.wall.screen(p.rect).contains(from))?;
@@ -587,39 +710,95 @@ fn mix(column: i32, row: i32) -> u32 {
 pub const SEAM_ANCHOR: f32 = -GAP / 2.0;
 /// `SEAM_EDGE_MARGIN`: the seam starts closing this far from the window edge.
 const SEAM_EDGE: f32 = 14.0;
+/// `SEAM_LINE_DISTANCE_WEIGHT`.
+const LINE_WEIGHT: f32 = 0.15;
+const COAST_MIN: f32 = 40.0;
+const COAST_MAX: f32 = 4000.0;
+const COAST_POWER: f32 = 0.3;
+const COAST_MS: f32 = 280.0;
+const COAST_REST: f32 = 0.5;
+const COAST_STALE_MS: u32 = 80;
 
-/// Where the seam is on screen: its centre and how wide it is open.
+/// Where the seam is on screen: its centre, how wide it is open, and whether the edge shut it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Seam {
     pub center: f32,
     pub width: f32,
+    /// Meant to be open but squeezed shut (`getSeamGeometry` `collapsed`).
+    pub collapsed: bool,
+    /// The centre is before the base line, so a vertical tab sits on the left.
+    pub before: bool,
+    pub horizontal: bool,
 }
 
-/// `getSeamGeometry`: the anchor follows the camera; near an edge the opening narrows to what still fits.
-pub fn seam_geometry(pan_x: f32, open_width: f32, viewport_width: f32) -> Seam {
+/// `getSeamGeometry` for a vertical seam anchored on column 0. `camera` is the world point under the base line.
+pub fn seam_geometry(camera: f32, open_width: f32, viewport_width: f32) -> Seam {
     let scale = wall_scale(viewport_width);
-    let center = viewport_width / 2.0 + (SEAM_ANCHOR - pan_x) * scale;
-    let room = center.min(viewport_width - center) - SEAM_EDGE;
-    Seam { center, width: open_width.min(room * 2.0).max(0.0) }
+    seam_on_axis(SEAM_ANCHOR, camera, open_width, viewport_width, viewport_width / 2.0, scale, false)
+}
+
+/// `geometryOnAxis`: the anchor follows the camera and narrows within `SEAM_EDGE` of either end.
+pub fn seam_on_axis(
+    anchor: f32,
+    camera: f32,
+    open_width: f32,
+    extent: f32,
+    line: f32,
+    scale: f32,
+    horizontal: bool,
+) -> Seam {
+    let center = line + (anchor - camera) * scale;
+    let room = center.min(extent - center) - SEAM_EDGE;
+    let width = open_width.min(room * 2.0).max(0.0);
+    Seam { center, width, collapsed: open_width > 1.0 && width < 2.0, before: center < line, horizontal }
+}
+
+/// `(开口 / 排版宽度 − 0.35) / 0.65`, zero once the opening is under 35% of the laid-out width.
+pub fn content_opacity(open: f32, layout: f32) -> f32 {
+    ((open / layout.max(1.0) - 0.35) / 0.65).clamp(0.0, 1.0)
+}
+
+/// The wider side of a seam, or the whole extent when the seam is shut. Equal sides take the far one.
+pub fn wider_span(center: f32, width: f32, extent: f32) -> (f32, f32) {
+    if width < 1.0 || extent <= 0.0 {
+        return (0.0, extent.max(0.0));
+    }
+    let near = (center - width / 2.0).clamp(0.0, extent);
+    let far = (center + width / 2.0).clamp(0.0, extent);
+    let far_room = extent - far;
+    if far_room >= near { (far, far_room) } else { (0.0, near) }
+}
+
+/// `blockSeamPlan`: the boundary near `camera`, and the camera after the smallest yield that fits `open`.
+pub fn plan_opening(camera: f32, open: f32, extent: f32, line: f32, scale: f32, block: f32) -> (f32, f32) {
+    if block <= 1.0 || scale <= 0.0 || extent <= 0.0 {
+        return (SEAM_ANCHOR, camera);
+    }
+    let need = open / 2.0 + SEAM_EDGE;
+    let base = js_round((camera + GAP / 2.0) / block);
+    let mut best = (SEAM_ANCHOR, camera);
+    let mut best_score = f32::INFINITY;
+    for index in (base - 1)..=(base + 1) {
+        let at = index as f32 * block - GAP / 2.0;
+        let screen = line + (at - camera) * scale;
+        let fit = need.max((extent - need).min(screen));
+        let next = at - (fit - line) / scale;
+        let shift = (next - camera).abs() * scale;
+        let score = shift + (fit - line).abs() * LINE_WEIGHT;
+        if score < best_score {
+            best = (at, next);
+            best_score = score;
+        }
+    }
+    best
+}
+
+/// `Math.round`: halves go towards +∞, unlike Rust's half-away-from-zero.
+fn js_round(value: f32) -> i32 {
+    (value + 0.5).floor() as i32
 }
 
 /// `getSeamSplitOffsets`: how far the halves of the wall move apart, on screen, for an opening this wide.
 fn seam_push(width: f32, scale: f32) -> f32 {
     width / 2.0 + GAP / 2.0 * scale * (width / 16.0).min(1.0)
-}
-
-/// `getWallCameraRange` and `getSeamCameraSpan` on x: the camera may show all the tiles and keep the seam open.
-pub fn camera_range_x(left: f32, right: f32, open_width: f32, viewport_width: f32) -> (f32, f32) {
-    let scale = wall_scale(viewport_width);
-    let line = viewport_width / 2.0;
-    let side = (line - open_width / 2.0) / scale;
-    let (mut min, mut max) = (left + side, right - side);
-    if min > max {
-        (min, max) = (SEAM_ANCHOR, SEAM_ANCHOR);
-    }
-    let need = open_width / 2.0 + SEAM_EDGE;
-    let span_min = SEAM_ANCHOR - (viewport_width - need - line) / scale;
-    let span_max = SEAM_ANCHOR + (line - need) / scale;
-    let (span_min, span_max) = if span_min <= span_max { (span_min, span_max) } else { (SEAM_ANCHOR, SEAM_ANCHOR) };
-    (min.min(span_min), max.max(span_max))
 }

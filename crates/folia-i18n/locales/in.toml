@@ -3,6 +3,7 @@ name = "Folia"
 
 [options]
 save = "Simpan"
+refresh = "Segarkan"
 playerBottomBarPositioningHint = "Seret bilah untuk mengatur ketinggiannya"
 playerBottomBarRepositionUnavailable = "Putar lagu dulu — bilah kontrol harus tampil untuk bisa dipindahkan"
 playerBottomBarReposition = "Atur posisi di halaman pemutar"
@@ -131,6 +132,8 @@ sourceNetease = "NetEase"
 homeTitle = "Pustaka"
 seamFold = "Lipat"
 seamExpand = "Bentangkan"
+seamRestore = "Bentangkan strip info"
+seamReopenHere = "Belah di sini"
 
 [libraryBravaisHome]
 search = "Cari"
@@ -138,6 +141,10 @@ searchSubmit = "Cari"
 settings = "Pengaturan"
 more = "Lainnya"
 backToPlayer = "Kembali ke pemutar"
+
+[libraryBravaisHome.wallHint]
+localTitle = "Belum ada musik lokal yang diimpor"
+localBody = "Pilih “{{action}}” di menu “⋯” pada strip info, lalu folder, album, dan artis Anda akan memenuhi dinding ini."
 
 [wallTools]
 queue = "Antrean putar"

@@ -1,4 +1,4 @@
-// Home shell: the left seam, the corner back button and the tools panel.
+// Home shell: the seam, the corner back button and the tools panel.
 
 mod seam;
 mod tools;
@@ -9,6 +9,7 @@ use folia_i18n::I18n;
 use folia_visualizer::Ease;
 
 use crate::motion::Tween;
+use crate::wall::Seam;
 use iced::widget::{mouse_area, space};
 use iced::{Color, Element, Length};
 
@@ -21,17 +22,36 @@ const PANEL_MS: f64 = 200.0;
 /// Concealed back button: 200ms CSS `ease`.
 const BACK_EASE: Ease = Ease::new(0.25, 0.1, 0.25, 1.0);
 const BACK_MS: f64 = 200.0;
+/// Edge tab slide: 240ms `cubic-bezier(0.2, 0.7, 0.25, 1)`.
+const TAB_EASE: Ease = Ease::new(0.2, 0.7, 0.25, 1.0);
+const TAB_MS: f64 = 240.0;
 /// Menu pop from `bravaisPopMotion`: 0.18s in, 0.12s out.
 const POP_IN: Ease = Ease::new(0.2, 0.7, 0.25, 1.0);
 const POP_OUT: Ease = Ease::new(0.42, 0.0, 1.0, 1.0);
 const POP_IN_MS: f64 = 180.0;
 const POP_OUT_MS: f64 = 120.0;
+/// `BRAVAIS_NARROW_VIEWPORT_PX`.
+const NARROW_VW: f32 = 900.0;
 const NARROW: f32 = 120.0;
 const SPINE: f32 = 64.0;
+const ROW_NARROW: f32 = 72.0;
+const ROW_SPINE: f32 = 52.0;
+/// Presence spring of the player safe area: stiffness 280, damping 28.
+const PRESENCE_MS: f64 = 600.0;
+
+/// `full` is the home narrow seam, `spine` the book spine, `hidden` the edge tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Level {
+    Full,
+    Spine,
+    Hidden,
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Fold,
+    Expand,
+    Tab,
     More,
     Tools,
     Search,
@@ -48,9 +68,13 @@ pub enum Message {
 }
 
 pub struct HomeChrome {
-    spine: bool,
+    level: Level,
+    restore: Level,
+    horizontal: bool,
+    /// The axis to open on once the current one has shut.
+    pending_horizontal: Option<bool>,
+    seen_width: f32,
     more: bool,
-
     tools_goal: f32,
     tools_from: f32,
     tools_at: Instant,
@@ -66,15 +90,24 @@ pub struct HomeChrome {
     menu_from: f32,
     menu_at: Instant,
     menu_ms: f64,
+    presence_from: f32,
+    presence_goal: f32,
+    presence_at: Instant,
+    tab_from: f32,
+    tab_goal: f32,
+    tab_at: Instant,
 }
 
 impl HomeChrome {
     pub fn new() -> Self {
         let now = Instant::now();
         Self {
-            spine: false,
+            level: Level::Full,
+            restore: Level::Full,
+            horizontal: false,
+            pending_horizontal: None,
+            seen_width: 0.0,
             more: false,
-
             tools_goal: 0.0,
             tools_from: 0.0,
             tools_at: now,
@@ -89,25 +122,28 @@ impl HomeChrome {
             menu_from: 0.0,
             menu_at: now,
             menu_ms: POP_IN_MS,
+            presence_from: 0.0,
+            presence_goal: 0.0,
+            presence_at: now,
+            tab_from: 0.0,
+            tab_goal: 0.0,
+            tab_at: now,
         }
     }
 
     pub fn update(&mut self, message: &Message) {
         let now = Instant::now();
         match message {
-            Message::Fold => {
-                self.spine = !self.spine;
-                if self.spine {
-                    self.set_menu(now, false);
-                }
-                self.retarget_seam(now);
-            }
+            Message::Fold => self.fold(now),
+            Message::Expand => self.set_level(Level::Full, now),
+            Message::Tab => self.restore_or_reopen(now),
             Message::More => {
-                if self.spine {
-                    self.spine = false;
-                    self.retarget_seam(now);
+                if self.level == Level::Spine {
+                    self.set_level(Level::Full, now);
+                    self.set_menu(now, true);
+                } else {
+                    self.set_menu(now, !self.more);
                 }
-                self.set_menu(now, !self.more);
             }
             Message::Tools => self.retarget_tools(now, if self.tools_goal > 0.5 { 0.0 } else { 1.0 }),
             Message::Dismiss => {
@@ -125,6 +161,62 @@ impl HomeChrome {
             Message::BackHover(hovered) => self.back_hover.set(if *hovered { 1.0 } else { 0.0 }, now),
             Message::Frame | Message::Volume(_) | Message::VolumeDone | Message::Mute => {}
         }
+    }
+
+    /// Viewport width picks the default level; a portrait window (`height ≥ width × 1.1`) turns the seam sideways.
+    pub fn sync(&mut self, width: f32, height: f32, has_track: bool, now: Instant) {
+        if width > 0.0 {
+            self.sync_width(width, now);
+            self.sync_axis(height >= width * 1.1, now);
+        }
+        let goal = if has_track { 1.0 } else { 0.0 };
+        if (goal - self.presence_goal).abs() > 0.001 {
+            self.presence_from = self.presence(now);
+            self.presence_goal = goal;
+            self.presence_at = now;
+        }
+    }
+
+    /// Slides the edge tab in when it becomes visible.
+    pub fn sync_tab(&mut self, visible: bool, now: Instant) {
+        let goal = if visible { 1.0 } else { 0.0 };
+        if (goal - self.tab_goal).abs() < 0.001 {
+            return;
+        }
+        self.tab_from = self.tab(now);
+        self.tab_goal = goal;
+        self.tab_at = now;
+    }
+
+    /// Once a direction change has shut the seam, opens it on the new axis. `Some` asks the wall to replan.
+    pub fn take_flip(&mut self, now: Instant) -> Option<bool> {
+        let next = self.pending_horizontal?;
+        if self.width(now) > 0.5 {
+            return None;
+        }
+        self.pending_horizontal = None;
+        self.horizontal = next;
+        self.seam_from = 0.0;
+        self.seam_goal = open_width(self.level, next);
+        self.seam_at = now;
+        Some(next)
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.level == Level::Hidden
+    }
+
+    pub fn is_horizontal(&self) -> bool {
+        self.horizontal
+    }
+
+    pub fn is_spine(&self) -> bool {
+        self.level == Level::Spine
+    }
+
+    /// The width this level opens to, not the width it has animated to.
+    pub fn goal(&self) -> f32 {
+        open_width(self.level, self.horizontal)
     }
 
     pub fn set_back(&mut self, shown: bool, now: Instant) {
@@ -146,7 +238,10 @@ impl HomeChrome {
             || self.busy(self.seam_from, self.seam_goal, self.seam_at, now, SEAM_MS)
             || self.busy(self.back_from, self.back_goal, self.back_at, now, BACK_MS)
             || self.busy(self.menu_from, self.menu_goal, self.menu_at, now, self.menu_ms)
+            || self.busy(self.tab_from, self.tab_goal, self.tab_at, now, TAB_MS)
             || self.back_hover.running(now)
+            || self.presence_running(now)
+            || self.pending_horizontal.is_some()
     }
 
     pub fn width(&self, now: Instant) -> f32 {
@@ -166,6 +261,84 @@ impl HomeChrome {
         mix(self.menu_from, self.menu_goal, self.menu_at, now, self.menu_ms, ease)
     }
 
+    pub fn tab(&self, now: Instant) -> f32 {
+        mix(self.tab_from, self.tab_goal, self.tab_at, now, TAB_MS, TAB_EASE)
+    }
+
+    pub fn presence(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.presence_at).as_secs_f64();
+        if elapsed * 1000.0 >= PRESENCE_MS {
+            return self.presence_goal;
+        }
+        folia_visualizer::spring(f64::from(self.presence_from), f64::from(self.presence_goal), elapsed, 280.0, 28.0)
+            as f32
+    }
+
+    fn sync_width(&mut self, width: f32, now: Instant) {
+        if self.seen_width == 0.0 {
+            let level = default_level(width);
+            self.level = level;
+            self.restore = level;
+            self.seen_width = width;
+            let open = open_width(level, self.horizontal);
+            self.seam_from = open;
+            self.seam_goal = open;
+            self.seam_at = now;
+            return;
+        }
+        let crossed = (self.seen_width < NARROW_VW) != (width < NARROW_VW);
+        self.seen_width = width;
+        if !crossed {
+            return;
+        }
+        let fallback = default_level(width);
+        if self.level == Level::Hidden {
+            self.restore = fallback;
+        } else {
+            self.set_level(fallback, now);
+        }
+    }
+
+    fn sync_axis(&mut self, portrait: bool, now: Instant) {
+        if portrait == self.horizontal || self.pending_horizontal == Some(portrait) {
+            return;
+        }
+        self.pending_horizontal = Some(portrait);
+        self.seam_from = self.width(now);
+        self.seam_goal = 0.0;
+        self.seam_at = now;
+        self.set_menu(now, false);
+    }
+
+    fn fold(&mut self, now: Instant) {
+        if self.level == Level::Hidden {
+            return;
+        }
+        self.restore = self.level;
+        self.set_level(Level::Hidden, now);
+    }
+
+    fn restore_or_reopen(&mut self, now: Instant) {
+        if self.level == Level::Hidden {
+            self.set_level(self.restore, now);
+            return;
+        }
+        self.seam_from = 0.0;
+        self.seam_goal = open_width(self.level, self.horizontal);
+        self.seam_at = now;
+    }
+
+    fn set_level(&mut self, level: Level, now: Instant) {
+        self.level = level;
+        if level != Level::Hidden {
+            self.restore = level;
+        }
+        if level != Level::Full {
+            self.set_menu(now, false);
+        }
+        self.retarget_seam(now);
+    }
+
     fn set_menu(&mut self, now: Instant, open: bool) {
         self.more = open;
         self.menu_from = self.menu(now);
@@ -176,7 +349,7 @@ impl HomeChrome {
 
     fn retarget_seam(&mut self, now: Instant) {
         self.seam_from = self.width(now);
-        self.seam_goal = if self.spine { SPINE } else { NARROW };
+        self.seam_goal = open_width(self.level, self.horizontal);
         self.seam_at = now;
     }
 
@@ -189,9 +362,39 @@ impl HomeChrome {
         }
     }
 
+    fn presence_running(&self, now: Instant) -> bool {
+        (self.presence_from - self.presence_goal).abs() > 0.001
+            && now.saturating_duration_since(self.presence_at).as_secs_f64() * 1000.0 < PRESENCE_MS
+    }
+
     fn busy(&self, from: f32, goal: f32, at: Instant, now: Instant, ms: f64) -> bool {
         (from - goal).abs() > 0.001 && now.saturating_duration_since(at).as_secs_f64() * 1000.0 < ms
     }
+}
+
+/// `resolveSeamLevel` default: under 900px the seam starts as a spine.
+pub fn default_level_is_spine(width: f32) -> bool {
+    width < NARROW_VW
+}
+
+fn default_level(width: f32) -> Level {
+    if default_level_is_spine(width) { Level::Spine } else { Level::Full }
+}
+
+fn open_width(level: Level, horizontal: bool) -> f32 {
+    match (level, horizontal) {
+        (Level::Hidden, _) => 0.0,
+        (Level::Spine, false) => SPINE,
+        (Level::Spine, true) => ROW_SPINE,
+        (Level::Full, false) => NARROW,
+        (Level::Full, true) => ROW_NARROW,
+    }
+}
+
+/// Seam content bottom inset. No song keeps 20px; a song springs to `offset + 80 + 8`.
+pub fn seam_safe_bottom(offset: f32, presence: f32) -> f32 {
+    let safe = offset + 80.0 + 8.0;
+    20.0 + presence * (safe - 20.0)
 }
 
 pub struct Host<'a> {
@@ -206,21 +409,26 @@ pub struct Host<'a> {
     pub muted: bool,
     pub window_width: f32,
     pub window_height: f32,
-    /// Where the wall has opened the seam on screen.
-    pub seam: crate::wall::Seam,
+    pub seam: Seam,
+    pub spine: bool,
+    pub horizontal: bool,
+    pub opacity: f32,
+    pub bottom: f32,
+    pub status: Option<&'a str>,
+    pub show_tab: bool,
+    pub tab_hidden: bool,
+    pub tab: f32,
 }
 
 /// Back button, then the seam, then a dismiss layer, then the tools. The seam paints over the back.
 pub fn overlay<'a>(home: &'a HomeChrome, host: Host<'a>, now: Instant) -> Element<'a, Message> {
-    // The seam is as wide as the wall opened it; near an edge that is less than the chrome asks for.
-    let width = host.seam.width;
     let back = tools::back(&host, home.back(now), home.back_hover.value(now));
-    let mut layers = iced::widget::stack![back, seam::bar(home, &host, width)];
+    let mut layers = iced::widget::stack![back, seam::bar(home, &host, now)];
     if home.menu_open() {
         let scrim = mouse_area(space().width(Length::Fill).height(Length::Fill)).on_press(Message::Dismiss);
         layers = layers.push(scrim);
     }
-    if let Some(menu) = seam::popup(home, &host, width, now) {
+    if let Some(menu) = seam::popup(home, &host, now) {
         layers = layers.push(menu);
     }
     layers.push(tools::dock(home, &host, now)).width(Length::Fill).height(Length::Fill).into()

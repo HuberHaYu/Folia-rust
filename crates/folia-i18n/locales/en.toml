@@ -3,6 +3,7 @@ name = "Folia"
 
 [options]
 save = "Save"
+refresh = "Refresh"
 playerBottomBarPositioningHint = "Drag the bar to set its height"
 playerBottomBarRepositionUnavailable = "Play something first — the control bar has to be on screen to move it"
 playerBottomBarReposition = "Reposition on player page"
@@ -131,6 +132,8 @@ sourceNetease = "NetEase"
 homeTitle = "Library"
 seamFold = "Fold"
 seamExpand = "Expand"
+seamRestore = "Expand the info strip"
+seamReopenHere = "Split here"
 
 [libraryBravaisHome]
 search = "Search"
@@ -138,6 +141,10 @@ searchSubmit = "Search"
 settings = "Settings"
 more = "More"
 backToPlayer = "Back to the player"
+
+[libraryBravaisHome.wallHint]
+localTitle = "No local music imported yet"
+localBody = "Choose “{{action}}” under “⋯” in the info strip, and your folders, albums and artists will fill this wall."
 
 [wallTools]
 queue = "Play queue"

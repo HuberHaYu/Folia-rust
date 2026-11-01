@@ -3,6 +3,7 @@ name = "Folia"
 
 [options]
 save = "Lưu"
+refresh = "Làm mới"
 playerBottomBarPositioningHint = "Kéo thanh để chỉnh chiều cao"
 playerBottomBarRepositionUnavailable = "Cần phát nhạc trước — thanh điều khiển phải hiển thị mới có thể di chuyển"
 playerBottomBarReposition = "Chỉnh vị trí trên trang phát"
@@ -131,6 +132,8 @@ sourceNetease = "NetEase"
 homeTitle = "Thư viện"
 seamFold = "Gập"
 seamExpand = "Mở rộng"
+seamRestore = "Mở rộng thanh thông tin"
+seamReopenHere = "Mở thanh thông tin tại đây"
 
 [libraryBravaisHome]
 search = "Tìm kiếm"
@@ -138,6 +141,10 @@ searchSubmit = "Tìm kiếm"
 settings = "Cài đặt"
 more = "Thêm"
 backToPlayer = "Về trình phát"
+
+[libraryBravaisHome.wallHint]
+localTitle = "Chưa nhập nhạc cục bộ"
+localBody = "Chọn “{{action}}” dưới mục “⋯” trên thanh thông tin; thư mục, album và nghệ sĩ của bạn sẽ lấp đầy bức tường này."
 
 [wallTools]
 queue = "Hàng đợi phát"
