@@ -10,6 +10,8 @@ mod netease;
 mod qishui;
 #[cfg(feature = "qq")]
 mod qq;
+#[cfg(feature = "spotify")]
+mod spotify;
 
 use crate::Provider;
 
@@ -25,5 +27,7 @@ pub fn all(http: &reqwest::Client) -> Vec<Box<dyn Provider>> {
         Box::new(bodian::Bodian::new(http.clone())),
         #[cfg(feature = "qishui")]
         Box::new(qishui::Qishui::new(http.clone())),
+        #[cfg(feature = "spotify")]
+        Box::new(spotify::Spotify::new(http.clone())),
     ]
 }

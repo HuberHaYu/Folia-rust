@@ -7,12 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["netease", "kugou", "qq", "bodian", "qishui"]
+default = ["netease", "kugou", "qq", "bodian", "qishui", "spotify"]
 netease = []
 kugou = ["dep:flate2", "dep:num-bigint"]
 qq = ["dep:flate2", "dep:num-bigint"]
 bodian = []
 qishui = ["dep:ring"]
+spotify = ["dep:ring", "dep:librespot-audio", "dep:librespot-core", "dep:librespot-metadata"]
 
 [dependencies]
 folia-core.workspace = true
@@ -22,6 +23,9 @@ base64.workspace = true
 flate2 = { workspace = true, optional = true }
 image.workspace = true
 keyring.workspace = true
+librespot-audio = { workspace = true, optional = true }
+librespot-core = { workspace = true, optional = true }
+librespot-metadata = { workspace = true, optional = true }
 md-5.workspace = true
 num-bigint = { workspace = true, optional = true }
 qrcode.workspace = true
