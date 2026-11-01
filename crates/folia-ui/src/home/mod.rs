@@ -1,5 +1,6 @@
 // Home shell: the seam, the corner back button and the tools panel.
 
+pub mod flip;
 mod seam;
 mod tools;
 

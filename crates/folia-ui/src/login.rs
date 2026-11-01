@@ -420,6 +420,8 @@ impl Login {
                 if let Some(at) = self.done_at {
                     let elapsed = now.saturating_duration_since(at).as_secs_f64() * 1000.0;
                     if elapsed >= DONE_END {
+                        // Leaving `Reading` stops `sync` from starting the finished sign-in over again.
+                        self.phase = Phase::Idle;
                         self.done_at = None;
                         self.open = false;
                         self.round += 1;

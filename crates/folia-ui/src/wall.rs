@@ -14,6 +14,8 @@ use iced::{Color, Font, Point, Rectangle, Renderer, Size, Task, Vector, mouse, w
 use crate::background::blocking;
 use crate::focus_card::{self, BlockShape, Focus, SlotId};
 use crate::lots::{self, LOT_COLS, LOT_ROWS, Lot};
+use crate::wall_pan::{self, Gesture, Glide, Inertia, Pointer, Release, WheelSource};
+use crate::wall_shift::{Kind, Pose, Shift};
 
 const CELL: f32 = 128.0;
 const GAP: f32 = 8.0;
@@ -25,7 +27,6 @@ const SLOTS_PER_BLOCK: usize = 12;
 pub const BLOCK_WIDTH: f32 = BLOCK_COLS as f32 * PITCH - GAP;
 const RANK_VERTICAL_WEIGHT: f32 = 0.9;
 const RANK_AREA_WEIGHT: f32 = 0.35;
-const DRAG_THRESHOLD: f32 = 4.0;
 /// Pixel budget of the decoded tile covers: three 1920×1080 screens of tiles at the 0.76 wall scale
 /// (about 14 MB of RGBA each), so panning back and forth does not decode again.
 const COVER_BYTES: usize = 48 * 1024 * 1024;
@@ -200,14 +201,16 @@ impl Typeset {
 #[derive(Debug, Clone)]
 pub enum Message {
     Viewport(Size),
+    /// A press: stops the inertia and the wheel glide.
+    Hold,
+    /// A drag or a trackpad scroll, in world units.
     Pan(Vector),
-    /// A released drag. `velocity` is the pointer in screen px/s; `stale` skips the coast.
-    Settled {
-        velocity: Vector,
-        stale: bool,
-    },
-    /// A click on a tile (`activate`), or on the wall where no tile is.
-    Press(Option<(usize, SlotId)>),
+    /// A wheel notch, in screen pixels for the glide to cover.
+    Wheel(Vector),
+    /// A released drag.
+    Settled(Release),
+    /// A click at a point on the untilted wall: on a tile (`activate`), or where no tile is.
+    Press(Option<(usize, SlotId)>, Point),
     CoversLoaded(Vec<(i64, Option<Cover>)>),
 }
 
@@ -229,21 +232,81 @@ pub struct Wall {
     anchor_y: f32,
     horizontal: bool,
     planned: bool,
-    coast: Option<Coast>,
     /// The focus card and the keyboard focus (`useBravaisFocus`).
     pub focus: Focus,
     /// The album wall's mosaic or shards while an album poster is on screen (`has-album-wall`).
     pub album: Option<crate::album_wall::AlbumWall>,
     /// The layer turning with a poster on screen.
     pub tilt: crate::poster_motion::Tilt,
+    inertia: Option<Inertia>,
+    glide: Option<Glide>,
+    /// The camera when the placements were last cut, with the overscan around it.
+    culled_at: Vector,
+    /// Where the last tile was pressed, on screen: a push turns the wall over from there.
+    pressed: Point,
+    next_shift: Option<Kind>,
+    shift: Option<Shift>,
+    /// The outgoing layer's tiles as they were on screen when the shift began.
+    ghosts: Vec<Ghost>,
+    /// Tiles that show the same item in the same place before and after the shift, and stay still.
+    steady: Vec<(i64, Rectangle)>,
+    /// The poster shade and the tag ground for night and day.
+    shades: [Shade; 2],
 }
 
-/// Release coast from `wallPanMotion`: amplitude `0.3 × speed`, time constant 280ms.
-struct Coast {
-    origin: Vector,
-    /// Pointer velocity in screen px/s, already capped.
-    velocity: Vector,
-    started: Instant,
+/// `.lattice-poster-shade` and the tag's ground as images. A canvas draws all its meshes below all its images, so
+/// these would land under the covers as filled shapes; images keep the order they are drawn in.
+struct Shade {
+    fade: Handle,
+    /// An album mosaic's lighter foot, so the pieces read as one cover.
+    mosaic: Handle,
+    ground: Handle,
+    /// The shade's colour for what stays a filled shape: the grown card's bands, the mosaic copy's shadow.
+    tint: Color,
+}
+
+impl Shade {
+    /// In black at night and white by day. The shade: 5% to 34% down, 24% at 56%, 92% at the bottom; the mosaic's:
+    /// nothing to 55% down, 12% at 74%, 40% at the bottom.
+    fn new(channel: u8) -> Self {
+        Self {
+            fade: shade_column(channel, &[(0.0, 0.05), (0.34, 0.05), (0.56, 0.24), (1.0, 0.92)]),
+            mosaic: shade_column(channel, &[(0.0, 0.0), (0.55, 0.0), (0.74, 0.12), (1.0, 0.40)]),
+            ground: Handle::from_rgba(1, 1, vec![channel, channel, channel, 255]),
+            tint: Color::from_rgb8(channel, channel, channel),
+        }
+    }
+}
+
+/// A one-pixel-wide image whose alpha runs through `stops` (position, alpha) from top to bottom.
+fn shade_column(channel: u8, stops: &[(f32, f32)]) -> Handle {
+    const ROWS: u32 = 128;
+    let alpha = |t: f32| {
+        stops.windows(2).find(|pair| t <= pair[1].0).map_or(0.0, |pair| {
+            let ((from, a), (to, b)) = (pair[0], pair[1]);
+            a + (t - from) / (to - from) * (b - a)
+        })
+    };
+    let pixels = (0..ROWS)
+        .flat_map(|row| {
+            let t = (row as f32 + 0.5) / ROWS as f32;
+            [channel, channel, channel, (alpha(t) * 255.0).round() as u8]
+        })
+        .collect::<Vec<u8>>();
+    Handle::from_rgba(1, ROWS, pixels)
+}
+
+/// A tile of the outgoing layer, kept to be drawn while it turns or lifts away.
+struct Ghost {
+    rect: Rectangle,
+    index: usize,
+    id: i64,
+    cover: Option<Handle>,
+    fallback: bool,
+    label: Option<Label>,
+    heading: bool,
+    hue: f32,
+    stack: bool,
 }
 
 impl Wall {
@@ -263,10 +326,18 @@ impl Wall {
             anchor_y: SEAM_ANCHOR,
             horizontal: false,
             planned: false,
-            coast: None,
             focus: Focus::default(),
             album: None,
             tilt: crate::poster_motion::Tilt::new(Instant::now()),
+            inertia: None,
+            glide: None,
+            culled_at: Vector::ZERO,
+            pressed: Point::ORIGIN,
+            next_shift: None,
+            shift: None,
+            ghosts: Vec::new(),
+            steady: Vec::new(),
+            shades: [Shade::new(0), Shade::new(255)],
         }
     }
 
@@ -329,15 +400,106 @@ impl Wall {
         self.anchor_x = anchor;
         self.anchor_y = anchor;
         self.planned = false;
-        self.coast = None;
+        self.inertia = None;
+        self.glide = None;
         self.labels.clear();
-        self.covers.clear();
         self.pending.clear();
         for download in self.downloads.drain(..) {
             download.abort();
         }
         self.refresh();
-        self.show_visible(tiles, omni)
+        let task = self.show_visible(tiles, omni);
+        self.start_shift(tiles);
+        task
+    }
+
+    /// The next relayout sends the whole wall away and back (a home tab switch) instead of turning it from the seam.
+    pub fn wave_next(&mut self) {
+        self.next_shift = Some(Kind::Wave);
+    }
+
+    /// The next relayout turns the wall over from the tile just pressed (a push into a collection).
+    pub fn flip_from_press(&mut self) {
+        self.next_shift = Some(Kind::Flip(self.pressed));
+    }
+
+    /// Keeps the tiles on screen to be drawn leaving during the next relayout; called before `tiles` is replaced.
+    pub fn capture(&mut self, tiles: &[Tile]) {
+        let now = Instant::now();
+        let screen = Rectangle::new(Point::ORIGIN, self.viewport);
+        let running = self.shift.filter(|shift| shift.running(now));
+        // Data arriving during a wave lands with the wave; the tiles already leaving keep leaving.
+        if self.next_shift.is_none() && running.is_some_and(|shift| shift.is_wave()) {
+            return;
+        }
+        let mut ghosts = std::mem::take(&mut self.ghosts);
+        ghosts.clear();
+        for placement in &self.shown {
+            let rect = self.screen(placement.rect);
+            if !rect.intersects(&screen) || running.is_some_and(|shift| shift.arriving(rect, now).is_none()) {
+                continue;
+            }
+            let Some(tile) = tiles.get(placement.track) else { continue };
+            let loaded = self.covers.peek(&tile.id);
+            ghosts.push(Ghost {
+                rect,
+                index: placement.track,
+                id: tile.id,
+                cover: loaded.and_then(Option::as_ref).cloned(),
+                fallback: shows_fallback(tile, loaded),
+                label: self.labels.get(&(placement.track, placement.rect.width as u32)).cloned(),
+                heading: tile.heading,
+                hue: tile.hue,
+                stack: tile.stack,
+            });
+        }
+        self.ghosts = ghosts;
+    }
+
+    /// Starts the shift from the captured tiles to the ones now laid out. Data arriving on the same layer turns the
+    /// changed tiles over from the seam (`pointOrigin(seamPoint)`), or lands with a wave still running
+    /// (`mergeFlipSteps`).
+    fn start_shift(&mut self, tiles: &[Tile]) {
+        if self.viewport.width < 1.0 {
+            self.shift = None;
+            self.ghosts.clear();
+            return;
+        }
+        let seam = self.seam();
+        let origin = if seam.horizontal {
+            Point::new(self.viewport.width / 2.0, seam.center)
+        } else {
+            Point::new(seam.center, self.viewport.height / 2.0)
+        };
+        let now = Instant::now();
+        let wave = self.shift.filter(|shift| shift.running(now) && shift.is_wave());
+        let screen = Rectangle::new(Point::ORIGIN, self.viewport);
+        if let (None, Some(mut wave)) = (self.next_shift, wave) {
+            wave.reach(
+                self.shown.iter().map(|placement| self.screen(placement.rect)).filter(|r| r.intersects(&screen)),
+            );
+            self.shift = Some(wave);
+            self.steady.clear();
+            return;
+        }
+        let kind = self.next_shift.take().unwrap_or(Kind::Flip(origin));
+        let arriving: Vec<(i64, Rectangle)> = self
+            .shown
+            .iter()
+            .map(|placement| (placement.track, self.screen(placement.rect)))
+            .filter(|(_, rect)| rect.intersects(&screen))
+            .filter_map(|(track, rect)| tiles.get(track).map(|tile| (tile.id, rect)))
+            .collect();
+        let ghosts = &self.ghosts;
+        self.steady = arriving
+            .iter()
+            .copied()
+            .filter(|&(id, rect)| ghosts.iter().any(|g| g.id == id && same_place(g.rect, rect)))
+            .collect();
+        let steady = &self.steady;
+        self.ghosts.retain(|g| !steady.iter().any(|&(id, rect)| g.id == id && same_place(g.rect, rect)));
+        let rects = self.ghosts.iter().map(|ghost| ghost.rect).chain(arriving.iter().map(|&(_, rect)| rect));
+        self.shift = Some(Shift::new(kind, wall_scale(self.viewport.width), Instant::now(), rects));
     }
 
     /// The explore layout's seam stands in the street between lot columns −1 and 0.
@@ -367,16 +529,34 @@ impl Wall {
                 self.refresh();
                 (self.show_visible(tiles, omni), None)
             }
+            Message::Hold => {
+                self.inertia = None;
+                self.glide = None;
+                (Task::none(), None)
+            }
             Message::Pan(delta) => {
                 self.focus.stop_camera();
-                self.pan_by(delta);
-                (self.show_visible(tiles, omni), None)
+                self.inertia = None;
+                // A trackpad scroll that interrupts a wheel glide takes the distance the glide had left.
+                let carry = self.glide.take().map_or(Vector::ZERO, |glide| glide.pending());
+                let scale = wall_scale(self.viewport.width).max(0.01);
+                self.pan += delta + carry * (1.0 / scale);
+                (self.follow(tiles, omni), None)
             }
-            Message::Settled { velocity, stale } => {
-                self.release(velocity, stale);
-                (self.show_visible(tiles, omni), None)
+            Message::Wheel(delta) => {
+                self.inertia = None;
+                self.glide.get_or_insert_default().add(delta);
+                (Task::none(), None)
             }
-            Message::Press(hit) => (Task::none(), Some(hit)),
+            Message::Settled(release) => {
+                let scale = wall_scale(self.viewport.width);
+                self.inertia = Inertia::start(release, self.pan, scale, Instant::now());
+                (Task::none(), None)
+            }
+            Message::Press(hit, at) => {
+                self.pressed = at;
+                (Task::none(), Some(hit))
+            }
             Message::CoversLoaded(covers) => {
                 for (id, cover) in covers {
                     self.pending.remove(&id);
@@ -486,10 +666,15 @@ impl Wall {
     fn refresh(&mut self) {
         let mut shown = std::mem::take(&mut self.shown);
         shown.clear();
-        let screen = Rectangle::new(Point::ORIGIN, self.viewport);
+        self.culled_at = self.pan;
         if self.viewport.width >= 1.0 {
             let scale = wall_scale(self.viewport.width).max(0.01);
-            let reach = seam_push(self.seam().width, scale) / scale;
+            let margin = wall_pan::OVERSCAN * scale;
+            let screen = Rectangle::new(
+                Point::new(-margin, -margin),
+                Size::new(self.viewport.width + margin * 2.0, self.viewport.height + margin * 2.0),
+            );
+            let reach = seam_push(self.seam().width, scale) / scale + wall_pan::OVERSCAN;
             let half =
                 Vector::new(self.viewport.width / 2.0 / scale + reach, self.viewport.height / 2.0 / scale + reach);
             let (low, high) = (self.pan - half, self.pan + half);
@@ -602,52 +787,44 @@ impl Wall {
         self.replan(self.seam_open);
     }
 
+    /// Whether the camera or the tiles move on their own: inertia, a wheel glide or a shift.
     pub fn coasting(&self) -> bool {
-        self.coast.is_some()
+        self.inertia.is_some() || self.glide.is_some() || self.shift.is_some()
     }
 
-    /// Steps the release coast. Returns whether the camera moved.
-    pub fn tick_coast(&mut self, now: Instant) -> bool {
-        let Some(coast) = &self.coast else { return false };
-        let (origin, velocity, started) = (coast.origin, coast.velocity, coast.started);
-        let speed = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
-        if speed < 1.0 {
-            self.coast = None;
-            return false;
+    /// Steps the inertia, the wheel glide and the shift for this frame.
+    pub fn tick_coast(&mut self, now: Instant, tiles: &[Tile], omni: Option<&Omni>) -> Task<Message> {
+        if let Some(inertia) = self.inertia {
+            let (pan, moving) = inertia.at(now);
+            self.pan = pan;
+            if !moving {
+                self.inertia = None;
+            }
         }
-        let t = now.saturating_duration_since(started).as_secs_f32() * 1000.0;
-        let amplitude = speed * COAST_POWER;
-        let remaining = amplitude * (-t / COAST_MS).exp();
-        let distance = amplitude - remaining;
-        let scale = wall_scale(self.viewport.width).max(0.01);
-        let along = Vector::new(-velocity.x / speed, -velocity.y / speed) * (distance / scale);
-        self.pan = origin + along;
-        if remaining < COAST_REST {
-            self.coast = None;
+        if let Some(glide) = self.glide.as_mut() {
+            let scale = wall_scale(self.viewport.width).max(0.01);
+            match glide.step(now) {
+                Some(step) => self.pan += step * (1.0 / scale),
+                None => self.glide = None,
+            }
+        }
+        if self.shift.is_some_and(|shift| !shift.running(now)) {
+            self.shift = None;
+            self.ghosts = Vec::new();
+            self.steady.clear();
+        }
+        self.follow(tiles, omni)
+    }
+
+    /// The home wall is infinite, so the camera is not resisted. The placements are cut again, and what comes into
+    /// the overscan typeset and fetched, only once the camera has used up the overscan (`updateCamera`).
+    fn follow(&mut self, tiles: &[Tile], omni: Option<&Omni>) -> Task<Message> {
+        let moved = self.pan - self.culled_at;
+        if moved.x.abs().max(moved.y.abs()) <= wall_pan::OVERSCAN - wall_pan::CULL_EDGE_MARGIN {
+            return Task::none();
         }
         self.refresh();
-        true
-    }
-
-    /// The home wall is infinite, so a drag is not resisted. A new drag cancels the coast.
-    fn pan_by(&mut self, delta: Vector) {
-        self.coast = None;
-        self.pan += delta;
-        self.refresh();
-    }
-
-    fn release(&mut self, velocity: Vector, stale: bool) {
-        let speed = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
-        if stale || speed < COAST_MIN {
-            self.coast = None;
-            return;
-        }
-        let capped = speed.min(COAST_MAX);
-        self.coast = Some(Coast {
-            origin: self.pan,
-            velocity: Vector::new(velocity.x * capped / speed, velocity.y * capped / speed),
-            started: Instant::now(),
-        });
+        self.show_visible(tiles, omni)
     }
 
     pub fn view<'a>(
@@ -743,99 +920,60 @@ pub struct WallProgram<'a> {
     band: Option<crate::poster::Band<'a>>,
 }
 
-#[derive(Default)]
-pub struct DragState {
-    pressed_at: Option<Point>,
-    last: Option<Point>,
-    dragging: bool,
-    moved_at: Option<Instant>,
-    /// Pointer velocity in screen px/s.
-    velocity: Vector,
-}
-
 impl canvas::Program<Message> for WallProgram<'_> {
-    type State = DragState;
+    type State = Pointer;
 
     fn update(
         &self,
-        state: &mut DragState,
+        state: &mut Pointer,
         event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
-        let scale = wall_scale(bounds.width);
+        let scale = wall_scale(bounds.width).max(0.01);
+        let now = Instant::now();
         match event {
             Event::Window(window::Event::RedrawRequested(_)) => {
                 (bounds.size() != self.wall.viewport).then(|| Action::publish(Message::Viewport(bounds.size())))
             }
+            Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.shift = modifiers.shift();
+                None
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let at = cursor.position_in(bounds)?;
-                *state = DragState {
-                    pressed_at: Some(at),
-                    last: Some(at),
-                    dragging: false,
-                    moved_at: Some(Instant::now()),
-                    velocity: Vector::ZERO,
-                };
-                Some(Action::capture())
+                state.press(cursor.position_in(bounds)?, now);
+                Some(Action::publish(Message::Hold).and_capture())
             }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let (from, last) = (state.pressed_at?, state.last?);
-                let at = cursor.position_in(bounds).unwrap_or(last);
-                state.dragging |= from.distance(at) > DRAG_THRESHOLD;
-                let now = Instant::now();
-                if let Some(then) = state.moved_at {
-                    let dt = now.saturating_duration_since(then).as_secs_f32();
-                    if dt > 0.0 {
-                        state.velocity = Vector::new((at.x - last.x) / dt, (at.y - last.y) / dt);
-                    }
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                // The drag keeps the pointer outside the wall too, as the original's pointer capture does.
+                let at = Point::new(position.x - bounds.x, position.y - bounds.y);
+                match state.moved(at, now) {
+                    Gesture::Drag(moved) => Some(Action::publish(Message::Pan(moved * (-1.0 / scale))).and_capture()),
+                    _ => None,
                 }
-                state.moved_at = Some(now);
-                state.last = Some(at);
-                state.dragging.then(|| Action::publish(Message::Pan((last - at) * (1.0 / scale))).and_capture())
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                let from = state.pressed_at.take()?;
-                if std::mem::take(&mut state.dragging) {
-                    let stale = state.moved_at.is_none_or(|at| at.elapsed().as_millis() > u128::from(COAST_STALE_MS));
-                    let velocity = state.velocity;
-                    state.velocity = Vector::ZERO;
-                    return Some(Action::publish(Message::Settled { velocity, stale }));
-                }
-
-                // The grown card is on top, then the focused tile, then the rest in drawing order; a tilted layer is
-                // turned back first.
-                let now = Instant::now();
-                let from = self.wall.untilt(from, now);
-                let expanded = self.wall.focus.expanded().map(|(slot, _)| slot);
-                let keyboard = self.wall.focus.keyboard();
-                let hit = self
-                    .wall
-                    .shown
-                    .iter()
-                    .filter(|p| Some(p.slot) == expanded)
-                    .chain(self.wall.shown.iter().filter(|p| Some(p.slot) == keyboard && Some(p.slot) != expanded))
-                    .chain(self.wall.shown.iter().rev())
-                    .find(|p| self.wall.drawn(p, now).contains(from));
-                let Some(hit) = hit else { return Some(Action::publish(Message::Press(None))) };
-                let tile = self.tracks.get(hit.track)?;
-                (!tile.heading).then(|| Action::publish(Message::Press(Some((hit.track, hit.slot)))))
-            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.release(now) {
+                Gesture::Release(release) => Some(Action::publish(Message::Settled(release))),
+                Gesture::Click(from) => self.press(from, now),
+                Gesture::None | Gesture::Drag(_) => None,
+            },
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 cursor.position_in(bounds)?;
-                let (dx, dy) = match delta {
-                    mouse::ScrollDelta::Lines { x, y } => (x * 60.0, y * 60.0),
-                    mouse::ScrollDelta::Pixels { x, y } => (*x, *y),
+                if state.pressed() {
+                    return Some(Action::capture());
+                }
+                let message = match state.wheel(*delta, now) {
+                    (WheelSource::Wheel, delta) => Message::Wheel(delta),
+                    (WheelSource::Trackpad, delta) => Message::Pan(delta * (1.0 / scale)),
                 };
-                Some(Action::publish(Message::Pan(Vector::new(-dx, -dy) * (1.0 / scale))).and_capture())
+                Some(Action::publish(message).and_capture())
             }
             _ => None,
         }
     }
-
     fn draw(
         &self,
-        _state: &DragState,
+        _state: &Pointer,
         renderer: &Renderer,
         _theme: &iced::Theme,
         bounds: Rectangle,
@@ -843,11 +981,12 @@ impl canvas::Program<Message> for WallProgram<'_> {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let Some(typeset) = self.wall.typeset else { return vec![frame.into_geometry()] };
-        let palette = Palette::new(self.theme, self.daylight);
+        let palette = Palette::new(self.theme, self.daylight, &self.wall.shades);
         let now = Instant::now();
         // `withTilt`: both halves and the seam turn about the poster's right edge at half the window's height.
         let deg = self.wall.tilt.deg(now);
-        if deg.abs() > 0.001 {
+        let tilted = deg.abs() > 0.001;
+        if tilted {
             let pivot = self.wall.pivot();
             frame.translate(Vector::new(pivot.x, pivot.y));
             frame.rotate(deg.to_radians());
@@ -856,6 +995,11 @@ impl canvas::Program<Message> for WallProgram<'_> {
                 self.wall.draw_band(&mut frame, band);
             }
         }
+        let shift = self.wall.shift.filter(|shift| shift.running(now));
+        if let Some(shift) = shift {
+            self.draw_ghosts(&mut frame, shift, now, &typeset, &palette);
+        }
+        let screen = Rectangle::new(Point::ORIGIN, bounds.size());
         let expanded = self.wall.focus.expanded().map(|(slot, _)| slot);
         let keyboard = self.wall.focus.keyboard();
         let raised = |placement: &&Placement| Some(placement.slot) == expanded || Some(placement.slot) == keyboard;
@@ -868,8 +1012,16 @@ impl canvas::Program<Message> for WallProgram<'_> {
             .chain(self.wall.shown.iter().filter(|p| Some(p.slot) == keyboard && Some(p.slot) != expanded))
             .chain(self.wall.shown.iter().filter(|p| Some(p.slot) == expanded));
         for placement in order {
-            let Some(item) = self.tracks.get(placement.track) else { continue };
             let rect = self.wall.drawn(placement, now);
+            // The overscan is cut at the window, except on a turned layer whose corners swing into view.
+            let visible = tilted || rect.intersects(&screen);
+            let Some(item) = self.tracks.get(placement.track).filter(|_| visible) else { continue };
+            let steady = self.wall.steady.iter().any(|&(id, place)| id == item.id && same_place(place, rect));
+            let pose = match shift {
+                Some(shift) if !steady => shift.arriving(rect, now),
+                _ => Some(Pose::REST),
+            };
+            let Some(pose) = pose else { continue };
             let world_width = self.wall.focus.rect(placement.slot, placement.rect, now).width;
             let label = [
                 world_width,
@@ -884,10 +1036,12 @@ impl canvas::Program<Message> for WallProgram<'_> {
             } else {
                 self.wall.art(placement, item, rect, Some(placement.slot) == keyboard || self.playing == Some(item.id))
             };
+            let loaded = self.wall.covers.peek(&item.id);
             let tile = Drawn {
                 rect,
                 index: placement.track,
-                cover: self.wall.covers.peek(&item.id).and_then(Option::as_ref),
+                cover: loaded.and_then(Option::as_ref),
+                fallback: shows_fallback(item, loaded),
                 art,
                 label: if grown { None } else { label },
                 current: self.playing == Some(item.id),
@@ -895,7 +1049,7 @@ impl canvas::Program<Message> for WallProgram<'_> {
                 hue: item.hue,
                 stack: item.stack,
             };
-            draw_tile(&mut frame, &tile, &typeset, &palette);
+            draw_tile(&mut frame, &tile, pose, &typeset, &palette);
             if grown {
                 draw_grown_shade(&mut frame, rect, &palette);
             }
@@ -907,19 +1061,76 @@ impl canvas::Program<Message> for WallProgram<'_> {
     }
 }
 
+impl WallProgram<'_> {
+    /// The tile under a click: the grown card on top, then the focused tile, then the rest in drawing order; a tilted
+    /// layer is turned back first.
+    fn press(&self, from: Point, now: Instant) -> Option<Action<Message>> {
+        let from = self.wall.untilt(from, now);
+        let expanded = self.wall.focus.expanded().map(|(slot, _)| slot);
+        let keyboard = self.wall.focus.keyboard();
+        let hit = self
+            .wall
+            .shown
+            .iter()
+            .filter(|p| Some(p.slot) == expanded)
+            .chain(self.wall.shown.iter().filter(|p| Some(p.slot) == keyboard && Some(p.slot) != expanded))
+            .chain(self.wall.shown.iter().rev())
+            .find(|p| self.wall.drawn(p, now).contains(from));
+        let Some(hit) = hit else { return Some(Action::publish(Message::Press(None, from))) };
+        let tile = self.tracks.get(hit.track)?;
+        (!tile.heading).then(|| Action::publish(Message::Press(Some((hit.track, hit.slot)), from)))
+    }
+
+    /// The outgoing layer's tiles, lifting or turning away.
+    fn draw_ghosts(&self, frame: &mut Frame, shift: Shift, now: Instant, typeset: &Typeset, palette: &Palette) {
+        for ghost in &self.wall.ghosts {
+            let Some(pose) = shift.leaving(ghost.rect, now) else { continue };
+            let tile = Drawn {
+                rect: ghost.rect,
+                index: ghost.index,
+                cover: ghost.cover.as_ref(),
+                fallback: ghost.fallback,
+                art: Art::None,
+                label: ghost.label.as_ref(),
+                current: self.playing == Some(ghost.id),
+                heading: ghost.heading,
+                hue: ghost.hue,
+                stack: ghost.stack,
+            };
+            draw_tile(frame, &tile, pose, typeset, palette);
+        }
+    }
+}
+
+/// `fallbackBackground` is painted only for an item without a cover address. A cover still loading, or one that
+/// would not load, leaves the bare poster ground (`--lattice-poster-background`) under the shade and the copy, and
+/// is swapped in at once when decoded, as a CSS background image is. A local file whose tags hold no picture has no
+/// cover address in the original.
+fn shows_fallback(tile: &Tile, loaded: Option<&Option<Handle>>) -> bool {
+    match tile.cover {
+        CoverSource::None => true,
+        CoverSource::Local(_) => matches!(loaded, Some(None)),
+        CoverSource::Remote(_) => false,
+    }
+}
+
+fn same_place(a: Rectangle, b: Rectangle) -> bool {
+    (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5 && (a.width - b.width).abs() < 0.5
+}
+
 /// The wall's colours from `wall.css`: ink on a poster ground, with a shade that is black at night and white by day.
-struct Palette {
+struct Palette<'a> {
     ink: Color,
     accent: Color,
     poster: Color,
-    shade: Color,
+    shade: &'a Shade,
     page_near: Color,
     page_far: Color,
     page_line: Color,
 }
 
-impl Palette {
-    fn new(theme: &Theme, daylight: bool) -> Self {
+impl<'a> Palette<'a> {
+    fn new(theme: &Theme, daylight: bool, shades: &'a [Shade; 2]) -> Self {
         let poster_mix = if daylight { 0.06 } else { 0.12 };
         // `.bravais-tile-face.is-stack`: the page colours mix the background with the poster ink.
         let (near, far, line_ink, line) =
@@ -928,15 +1139,27 @@ impl Palette {
             ink: rgb(theme.primary, 1.0),
             accent: rgb(theme.accent, 1.0),
             poster: rgb(theme.background.mix(theme.primary, poster_mix), 1.0),
-            shade: if daylight { Color::WHITE } else { Color::BLACK },
+            shade: &shades[usize::from(daylight)],
             page_near: rgb(theme.background.mix(theme.primary, near), 1.0),
             page_far: rgb(theme.background.mix(theme.primary, far), 1.0),
             page_line: rgb(theme.background.mix(line_ink, line), 1.0),
         }
     }
 
-    fn shade(&self, alpha: f32) -> Color {
-        Color { a: alpha, ..self.shade }
+    fn shade(&self, alpha: f32) -> canvas::Image {
+        canvas::Image::new(self.shade.fade.clone()).opacity(alpha)
+    }
+
+    fn mosaic(&self, alpha: f32) -> canvas::Image {
+        canvas::Image::new(self.shade.mosaic.clone()).opacity(alpha)
+    }
+
+    fn tint(&self, alpha: f32) -> Color {
+        Color { a: alpha, ..self.shade.tint }
+    }
+
+    fn ground(&self, alpha: f32) -> canvas::Image {
+        canvas::Image::new(self.shade.ground.clone()).opacity(alpha)
     }
 }
 
@@ -944,6 +1167,8 @@ struct Drawn<'a> {
     rect: Rectangle,
     index: usize,
     cover: Option<&'a Handle>,
+    /// The hue gradient under an item without a cover.
+    fallback: bool,
     art: Art<'a>,
     label: Option<&'a Label>,
     current: bool,
@@ -959,106 +1184,157 @@ enum Art<'a> {
     Shard { image: &'a Handle, rect: Rectangle, dots: Option<&'a Handle> },
 }
 
-// Everything is drawn in window coordinates: iced's `with_clip` does not move images and text into the clip.
-fn draw_tile(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Palette) {
+/// Where a shift's pose puts the parts of one tile: raised, scaled about its centre and squeezed across it. Frame
+/// transforms are not used: iced draws images in a clip untransformed, and turns text under an uneven scale into a
+/// mesh, which lands below the covers.
+#[derive(Debug, Clone, Copy)]
+struct Place {
+    around: Rectangle,
+    pose: Pose,
+}
+
+impl Place {
+    fn point(&self, point: Point) -> Point {
+        let center = self.around.center();
+        let pose = self.pose;
+        Point::new(
+            center.x + (point.x - center.x) * pose.squeeze * pose.scale,
+            center.y - pose.lift + (point.y - center.y) * pose.scale,
+        )
+    }
+
+    fn rect(&self, rect: Rectangle) -> Rectangle {
+        let origin = self.point(rect.position());
+        let pose = self.pose;
+        Rectangle::new(origin, Size::new(rect.width * pose.squeeze * pose.scale, rect.height * pose.scale))
+    }
+
+    /// Text takes the pose's scale but not the squeeze; a squeezed tile cuts it at its narrowed edges instead.
+    fn size(&self, size: f32) -> f32 {
+        size * self.pose.scale
+    }
+
+    // A path, not `fill_rectangle`: that keeps rectangles axis-aligned, so it would not turn with a tilted layer.
+    fn fill(&self, frame: &mut Frame, rect: Rectangle, fill: impl Into<canvas::Fill>) {
+        let rect = self.rect(rect);
+        frame.fill(&Path::rectangle(rect.position(), rect.size()), fill);
+    }
+}
+
+fn faded(color: Color, alpha: f32) -> Color {
+    Color { a: color.a * alpha, ..color }
+}
+
+/// Draws a tile in a shift's pose; `Pose::REST` for a tile at rest.
+fn draw_tile(frame: &mut Frame, tile: &Drawn, pose: Pose, typeset: &Typeset, palette: &Palette) {
+    if pose.alpha <= 0.0 || pose.squeeze * pose.scale < 0.01 {
+        return;
+    }
+    let place = Place { around: tile.rect, pose };
     let Rectangle { x, y, width, height } = tile.rect;
+    let alpha = pose.alpha;
     if tile.stack {
         // `has-stack-edges`: pages 6px and 3px down-right, each with a 1px line round it, under the poster.
         for (offset, page) in [(6.0, palette.page_far), (3.0, palette.page_near)] {
-            frame.fill(
-                &Path::rectangle(Point::new(x + offset - 1.0, y + offset - 1.0), Size::new(width + 2.0, height + 2.0)),
-                palette.page_line,
-            );
-            frame.fill(&Path::rectangle(Point::new(x + offset, y + offset), tile.rect.size()), page);
+            let line =
+                Rectangle::new(Point::new(x + offset - 1.0, y + offset - 1.0), Size::new(width + 2.0, height + 2.0));
+            place.fill(frame, line, faded(palette.page_line, alpha));
+            place.fill(frame, Rectangle::new(Point::new(x + offset, y + offset), tile.rect.size()), faded(page, alpha));
         }
     }
-    frame.fill(&Path::rectangle(tile.rect.position(), tile.rect.size()), palette.poster);
-    if tile.heading {
-        draw_badge(frame, tile, typeset, palette);
-        if let Some(label) = tile.label {
-            draw_copy(frame, tile.rect, label, typeset, palette.ink);
+    place.fill(frame, tile.rect, faded(palette.poster, alpha));
+    if !tile.heading {
+        if tile.fallback {
+            let fallback =
+                gradient::Linear::new(place.point(Point::new(x, y)), place.point(Point::new(x + width, y + height)))
+                    .add_stop(0.0, faded(hsl(tile.hue, 0.68, 0.58), alpha))
+                    .add_stop(1.0, faded(hsl((tile.hue + 52.0) % 360.0, 0.62, 0.18), alpha));
+            place.fill(frame, tile.rect, fallback);
         }
-        return;
+        draw_art(frame, tile, place);
+        // A mosaic tile keeps only a light shade at its foot, so the pieces read as one cover.
+        let shade = if matches!(tile.art, Art::Mosaic { .. }) { palette.mosaic(alpha) } else { palette.shade(alpha) };
+        frame.draw_image(place.rect(tile.rect), shade);
     }
-    let fallback = gradient::Linear::new(Point::new(x, y), Point::new(x + width, y + height))
-        .add_stop(0.0, hsl(tile.hue, 0.68, 0.58))
-        .add_stop(1.0, hsl((tile.hue + 52.0) % 360.0, 0.62, 0.18));
-    frame.fill(&Path::rectangle(tile.rect.position(), tile.rect.size()), fallback);
-    let mosaic = matches!(tile.art, Art::Mosaic { .. });
-    match tile.art {
-        Art::Mosaic { image, square } => {
-            frame.with_clip(tile.rect, |clipped| clipped.draw_image(square, canvas::Image::new(image.clone())));
-        }
-        Art::Shard { image, rect, dots } => {
-            frame.with_clip(tile.rect, |clipped| {
-                clipped.draw_image(rect, canvas::Image::new(image.clone()));
-                if let Some(dots) = dots {
-                    let side = crate::album_wall::DOTS_SIDE as f32;
-                    let mut row = y;
-                    while row < y + height {
-                        let mut column = x;
-                        while column < x + width {
-                            let cell = Rectangle::new(Point::new(column, row), Size::new(side, side));
-                            clipped.draw_image(cell, canvas::Image::new(dots.clone()));
-                            column += side;
-                        }
-                        row += side;
-                    }
-                }
-            });
-        }
-        Art::None => {
-            if let Some(handle) = tile.cover {
-                // `background-size: cover` of a square cover: drawn over the longer side, clipped to the slot.
-                let side = width.max(height);
-                let square =
-                    Rectangle { x: x + (width - side) / 2.0, y: y + (height - side) / 2.0, width: side, height: side };
-                frame.with_clip(tile.rect, |clipped| clipped.draw_image(square, canvas::Image::new(handle.clone())));
-            }
-        }
-    }
-    // A mosaic tile keeps only a light shade at its foot, so the pieces read as one cover; its copy stands on a shadow.
-    let fade = if mosaic {
-        gradient::Linear::new(Point::new(x, y), Point::new(x, y + height))
-            .add_stop(0.55, palette.shade(0.0))
-            .add_stop(0.74, palette.shade(0.12))
-            .add_stop(1.0, palette.shade(0.40))
+    if pose.squeeze < 1.0 {
+        frame.with_clip(place.rect(tile.rect), |clipped| draw_marks(clipped, tile, place, typeset, palette));
     } else {
-        gradient::Linear::new(Point::new(x, y), Point::new(x, y + height))
-            .add_stop(0.0, palette.shade(0.05))
-            .add_stop(0.34, palette.shade(0.05))
-            .add_stop(0.56, palette.shade(0.24))
-            .add_stop(1.0, palette.shade(0.92))
-    };
-    frame.fill(&Path::rectangle(tile.rect.position(), tile.rect.size()), fade);
-    draw_badge(frame, tile, typeset, palette);
-    if let Some(label) = tile.label {
-        if mosaic {
-            let below = Rectangle { y: tile.rect.y + 1.0, ..tile.rect };
-            draw_copy(frame, below, label, typeset, palette.shade(0.6));
-        }
-        draw_copy(frame, tile.rect, label, typeset, palette.ink);
+        draw_marks(frame, tile, place, typeset, palette);
     }
-    if tile.current {
+    if tile.current && !tile.heading {
+        let ring = place.rect(Rectangle { x: x + 1.0, y: y + 1.0, width: width - 2.0, height: height - 2.0 });
         frame.stroke(
-            &Path::rectangle(Point::new(x + 1.0, y + 1.0), Size::new(width - 2.0, height - 2.0)),
-            Stroke::default().with_width(2.0).with_color(palette.accent),
+            &Path::rectangle(ring.position(), ring.size()),
+            Stroke::default().with_width(2.0).with_color(faded(palette.accent, alpha)),
         );
     }
 }
 
+/// The cover, or the album wall's piece of it, clipped to the tile.
+fn draw_art(frame: &mut Frame, tile: &Drawn, place: Place) {
+    let Rectangle { x, y, width, height } = tile.rect;
+    let image = |handle: &Handle| canvas::Image::new(handle.clone()).opacity(place.pose.alpha);
+    match tile.art {
+        Art::Mosaic { image: cover, square } => {
+            frame.with_clip(place.rect(tile.rect), |clipped| clipped.draw_image(place.rect(square), image(cover)));
+        }
+        Art::Shard { image: cover, rect, dots } => frame.with_clip(place.rect(tile.rect), |clipped| {
+            clipped.draw_image(place.rect(rect), image(cover));
+            if let Some(dots) = dots {
+                draw_dots(clipped, tile.rect, place, image(dots));
+            }
+        }),
+        Art::None => {
+            let Some(handle) = tile.cover else { return };
+            // `background-size: cover` of a square cover: drawn over the longer side, clipped to the slot.
+            let side = width.max(height);
+            let square =
+                Rectangle { x: x + (width - side) / 2.0, y: y + (height - side) / 2.0, width: side, height: side };
+            frame.with_clip(place.rect(tile.rect), |clipped| clipped.draw_image(place.rect(square), image(handle)));
+        }
+    }
+}
+
+/// A shard's dot screen, tiled over the slot from its top-left corner.
+fn draw_dots(frame: &mut Frame, rect: Rectangle, place: Place, dots: canvas::Image) {
+    let side = crate::album_wall::DOTS_SIDE as f32;
+    let mut row = rect.y;
+    while row < rect.y + rect.height {
+        let mut column = rect.x;
+        while column < rect.x + rect.width {
+            let cell = Rectangle::new(Point::new(column, row), Size::new(side, side));
+            frame.draw_image(place.rect(cell), dots.clone());
+            column += side;
+        }
+        row += side;
+    }
+}
+
+/// The corner tag and the copy; a mosaic's copy stands on a shadow 1px below.
+fn draw_marks(frame: &mut Frame, tile: &Drawn, place: Place, typeset: &Typeset, palette: &Palette) {
+    draw_badge(frame, tile, place, typeset, palette);
+    let Some(label) = tile.label else { return };
+    let alpha = place.pose.alpha;
+    if matches!(tile.art, Art::Mosaic { .. }) {
+        let below = Rectangle { y: tile.rect.y + 1.0, ..tile.rect };
+        draw_copy(frame, below, place, label, typeset, palette.tint(0.6 * alpha));
+    }
+    draw_copy(frame, tile.rect, place, label, typeset, faded(palette.ink, alpha));
+}
+
 /// The track number in the top-left corner: 14px in, 11px heavy figures on a 62% shade (78% when playing).
-fn draw_badge(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Palette) {
+fn draw_badge(frame: &mut Frame, tile: &Drawn, place: Place, typeset: &Typeset, palette: &Palette) {
+    let alpha = place.pose.alpha;
     let inset = 14.0 * typeset.scale;
-    let origin = Point::new(tile.rect.x + inset, tile.rect.y + inset);
     let word = tile.label.and_then(|label| label.badge.as_ref());
     let size = word.map_or(typeset.badge_box, |(_, size)| *size);
-    frame.fill(&Path::rectangle(origin, size), palette.shade(if tile.current { 0.78 } else { 0.62 }));
+    let tag = Rectangle::new(Point::new(tile.rect.x + inset, tile.rect.y + inset), size);
+    frame.draw_image(place.rect(tag), palette.ground(if tile.current { 0.78 } else { 0.62 } * alpha));
     frame.fill_text(Text {
         content: word.map_or_else(|| format!("{:02}", tile.index + 1), |(text, _)| text.clone()),
-        position: Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0),
-        color: if tile.current { palette.accent } else { palette.ink },
-        size: typeset.badge.into(),
+        position: place.point(tag.center()),
+        color: faded(if tile.current { palette.accent } else { palette.ink }, alpha),
+        size: place.size(typeset.badge).into(),
         font: BADGE_FONT,
         align_x: iced::widget::text::Alignment::Center,
         align_y: iced::alignment::Vertical::Center,
@@ -1067,18 +1343,18 @@ fn draw_badge(frame: &mut Frame, tile: &Drawn, typeset: &Typeset, palette: &Pale
 }
 
 /// Title above the artist (5px gap), both 17px in from the tile's bottom-left.
-fn draw_copy(frame: &mut Frame, rect: Rectangle, label: &Label, typeset: &Typeset, ink: Color) {
+fn draw_copy(frame: &mut Frame, rect: Rectangle, place: Place, label: &Label, typeset: &Typeset, ink: Color) {
     let inset = 17.0 * typeset.scale;
     let left = rect.x + inset;
-    let width = (rect.width - inset * 2.0).max(1.0);
+    let width = place.size((rect.width - inset * 2.0).max(1.0));
     let mut bottom = rect.y + rect.height - inset;
     if !label.artist.is_empty() {
         frame.fill_text(Text {
             content: label.artist.clone(),
-            position: Point::new(left, bottom),
+            position: place.point(Point::new(left, bottom)),
             max_width: width,
-            color: Color { a: 0.78, ..ink },
-            size: typeset.artist.into(),
+            color: Color { a: 0.78 * ink.a, ..ink },
+            size: place.size(typeset.artist).into(),
             font: ARTIST_FONT,
             align_y: iced::alignment::Vertical::Bottom,
             ..Text::default()
@@ -1087,10 +1363,10 @@ fn draw_copy(frame: &mut Frame, rect: Rectangle, label: &Label, typeset: &Typese
     }
     frame.fill_text(Text {
         content: label.title.clone(),
-        position: Point::new(left, bottom),
+        position: place.point(Point::new(left, bottom)),
         max_width: width,
         color: ink,
-        size: typeset.title.into(),
+        size: place.size(typeset.title).into(),
         line_height: iced::widget::text::LineHeight::Relative(0.96),
         font: TITLE_FONT,
         align_y: iced::alignment::Vertical::Bottom,
@@ -1203,12 +1479,6 @@ pub const SEAM_ANCHOR: f32 = -GAP / 2.0;
 const SEAM_EDGE: f32 = 14.0;
 /// `SEAM_LINE_DISTANCE_WEIGHT`.
 const LINE_WEIGHT: f32 = 0.15;
-const COAST_MIN: f32 = 40.0;
-const COAST_MAX: f32 = 4000.0;
-const COAST_POWER: f32 = 0.3;
-const COAST_MS: f32 = 280.0;
-const COAST_REST: f32 = 0.5;
-const COAST_STALE_MS: u32 = 80;
 
 /// Where the seam is on screen: its centre, how wide it is open, and whether the edge shut it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1497,12 +1767,12 @@ fn draw_grown_shade(frame: &mut Frame, rect: Rectangle, palette: &Palette) {
     let Rectangle { x, y, width, height } = rect;
     let mut up = gradient::Linear::new(Point::new(x, y + height), Point::new(x, y));
     for (at, alpha) in focus_card::EXPANDED_SHADE {
-        up = up.add_stop(at, palette.shade(alpha));
+        up = up.add_stop(at, palette.tint(alpha));
     }
     frame.fill(&Path::rectangle(rect.position(), rect.size()), up);
     let mut across = gradient::Linear::new(Point::new(x, y), Point::new(x + width, y));
     for (at, alpha) in focus_card::EXPANDED_SIDE {
-        across = across.add_stop(at, palette.shade(alpha));
+        across = across.add_stop(at, palette.tint(alpha));
     }
     frame.fill(&Path::rectangle(rect.position(), rect.size()), across);
 }

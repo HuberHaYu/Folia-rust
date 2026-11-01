@@ -783,14 +783,14 @@ impl LibraryPage {
                 {
                     return (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None);
                 }
-                if self.wall.tick_coast(Instant::now()) {
-                    return (self.wall.show_visible(&self.tiles, self.online.omni()).map(Message::Wall), None);
-                }
-                (Task::none(), None)
+                (self.wall.tick_coast(now, &self.tiles, self.online.omni()).map(Message::Wall), None)
             }
             Message::Tab(tab) => {
                 if tab == self.tab && self.layer.is_none() {
                     return (Task::none(), None);
+                }
+                if self.layer.is_none() {
+                    self.wall.wave_next();
                 }
                 self.tab = tab;
                 self.layer = None;
@@ -1026,7 +1026,10 @@ impl LibraryPage {
                 self.source = Some(Source::Tab(HomeTab::Explore));
                 (Task::none(), Some(Effect::Play { queue: songs, index: song, origin }))
             }
-            Action::Open(collection) => (self.open(collection, i18n), None),
+            Action::Open(collection) => {
+                self.wall.flip_from_press();
+                (self.open(collection, i18n), None)
+            }
             Action::None => (Task::none(), None),
         }
     }
@@ -1104,6 +1107,7 @@ impl LibraryPage {
     /// Builds the tiles of the current layer or tab and lays them on the wall.
     fn rebuild(&mut self, i18n: &I18n) -> Task<Message> {
         let (tiles, actions, shape) = self.compose(i18n);
+        self.wall.capture(&self.tiles);
         self.tiles = tiles;
         self.actions = actions;
         self.wall.relayout(&self.tiles, shape, self.online.omni()).map(Message::Wall)

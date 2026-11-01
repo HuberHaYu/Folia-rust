@@ -17,6 +17,7 @@ mod motion;
 mod now_playing;
 mod online;
 mod overlay;
+mod page_fade;
 mod panel;
 mod playback;
 mod player_bar;
@@ -31,6 +32,8 @@ mod splash;
 mod track_list;
 mod typeface;
 mod wall;
+mod wall_pan;
+mod wall_shift;
 
 pub use background::{error_chain, format_time};
 pub use home::{default_level_is_spine, seam_safe_bottom};
@@ -41,6 +44,8 @@ pub use overlay::{
     upcoming_look, upcoming_px,
 };
 pub use wall::{SEAM_ANCHOR, Seam, content_opacity, plan_opening, seam_geometry, seam_on_axis, wider_span};
+pub use wall_pan::{Glide as WallGlide, Inertia as WallInertia, Release as WallRelease};
+pub use wall_shift::{Kind as ShiftKind, Pose as ShiftPose, Shift as WallShift};
 
 use std::path::PathBuf;
 
@@ -77,6 +82,9 @@ pub struct Init {
     pub open_files: Vec<PathBuf>,
 }
 
+/// The home tab and the open collection, whose change turns the seam's content over.
+type SeamKey = (folia_store::HomeTab, Option<String>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Library,
@@ -100,6 +108,10 @@ pub enum Message {
     OpenFiles(Vec<Track>),
     Chrome(chrome::Message),
     WindowReady(Option<iced::window::Id>),
+    /// The page being left, captured to fade out over the one replacing it.
+    PageShot(iced::window::Screenshot),
+    /// The capture is over; the page changes now if no picture of it came.
+    PageShotDone,
     WindowResized(Size),
     Maximized(bool),
     ChromeTick,
@@ -132,6 +144,11 @@ const ART_PX: u32 = 360;
 
 pub struct Shell {
     store: Store,
+    /// The page being left for or from the player fades out over the new one.
+    page_fade: Option<page_fade::PageFade>,
+    /// The page to show once the one being left has been captured.
+    next_page: Option<Page>,
+    seam_flip: Option<home::flip::SeamFlip>,
     general: GeneralSettings,
     appearance: AppearanceSettings,
     i18n: I18n,
@@ -184,6 +201,9 @@ impl Shell {
             i18n: init.i18n,
             system_locale: init.system_locale,
             page: Page::Library,
+            page_fade: None,
+            next_page: None,
+            seam_flip: None,
             settings: None,
             library,
             search: SearchPage::default(),
@@ -227,8 +247,24 @@ impl Shell {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let before = self.page;
+        let settles_page = matches!(message, Message::PageShot(_) | Message::PageShotDone);
+        let seam_before = self.seam_before(&message);
         let task = self.handle(message);
         let now = std::time::Instant::now();
+        if let Some((tab, layer, key)) = seam_before
+            && key != self.seam_key()
+        {
+            self.seam_flip = Some(home::flip::SeamFlip::new(tab, layer, now));
+        }
+        if self.seam_flip.as_ref().is_some_and(|flip| !flip.running(now)) {
+            self.seam_flip = None;
+        }
+        if self.page_fade.as_ref().is_some_and(|fade| !fade.running(now)) {
+            self.page_fade = None;
+        }
+        let fade = if settles_page { Task::none() } else { self.fade_page(before) };
+        let task = Task::batch([task, fade]);
         if self.page != Page::NowPlaying {
             self.positioning = None;
         }
@@ -350,6 +386,19 @@ impl Shell {
             Message::OpenFiles(_) => Task::none(),
             Message::WindowReady(id) => {
                 self.window = id.or(self.window);
+                Task::none()
+            }
+            Message::PageShot(shot) => {
+                if let Some(page) = self.next_page.take() {
+                    self.page = page;
+                    self.page_fade = Some(page_fade::PageFade::new(shot, std::time::Instant::now()));
+                }
+                Task::none()
+            }
+            Message::PageShotDone => {
+                if let Some(page) = self.next_page.take() {
+                    self.page = page;
+                }
                 Task::none()
             }
             Message::WindowResized(size) => {
@@ -778,6 +827,9 @@ impl Shell {
         if let Some(window) = self.login.view(look, now) {
             frame = frame.push(window.map(Message::Login));
         }
+        if let Some(fade) = &self.page_fade {
+            frame = frame.push(fade.view(now));
+        }
         // `z-[9999]`: the title bar sits above every page and dialog.
         let look = chrome::TitlebarLook {
             i18n: &self.i18n,
@@ -875,11 +927,17 @@ impl Shell {
         if self.page != Page::Search && self.bar.animating(now) {
             parts.push(iced::window::frames().map(|_| Message::Bar(player_bar::Message::Frame)));
         }
+        if self.page_fade.as_ref().is_some_and(|fade| fade.running(now)) {
+            parts.push(iced::window::frames().map(|_| Message::Chrome(chrome::Message::Frame)));
+        }
         if self.titlebar.animating(now) {
             parts.push(iced::window::frames().map(|_| Message::Chrome(chrome::Message::Frame)));
         }
         if self.page == Page::Library
-            && (self.home.animating(now) || self.library.coasting() || self.library.hint_busy(now))
+            && (self.home.animating(now)
+                || self.library.coasting()
+                || self.library.hint_busy(now)
+                || self.seam_flip.as_ref().is_some_and(|flip| flip.running(now)))
         {
             parts.push(iced::window::frames().map(|_| Message::Library(library::Message::Frame)));
         }
@@ -932,6 +990,8 @@ impl Shell {
     }
 
     fn home_host(&self) -> home::Host<'_> {
+        let now = std::time::Instant::now();
+        let leaving = self.seam_flip.as_ref().filter(|flip| flip.leaving(now));
         home::Host {
             i18n: &self.i18n,
             text: folia_visualizer::color(self.theme.primary, 1.0),
@@ -948,7 +1008,8 @@ impl Shell {
             seam: self.library.seam(),
             spine: self.home.is_spine(),
             horizontal: self.home.is_horizontal(),
-            opacity: content_opacity(self.library.seam().width, self.home.goal().max(1.0)),
+            opacity: content_opacity(self.library.seam().width, self.home.goal().max(1.0))
+                * self.seam_flip.as_ref().map_or(1.0, |flip| flip.opacity(now)),
             bottom: if self.home.is_horizontal() {
                 0.0
             } else {
@@ -959,18 +1020,59 @@ impl Shell {
             tab_hidden: self.home.is_hidden(),
             tab: self.home.tab(std::time::Instant::now()),
             tabs: library::TABS.iter().map(|&tab| (tab, self.i18n.t(library::tab_label(tab)))).collect(),
-            current: self.library.tab,
+            current: leaving.map_or(self.library.tab, |flip| flip.tab),
             account: self.account_slot(),
-            layer: self.library.layer_seam(
-                &self.i18n,
-                self.playback.current().map(|track| track.id),
-                (self.window_size.height / home::LIST_ROW) as usize,
-                self.window_size,
-            ),
+            layer: match leaving {
+                Some(flip) => flip.layer.clone(),
+                None => self.library.layer_seam(
+                    &self.i18n,
+                    self.playback.current().map(|track| track.id),
+                    (self.window_size.height / home::LIST_ROW) as usize,
+                    self.window_size,
+                ),
+            },
             poster_ground: self.library.poster_ground(),
             poster_tilted: self.library.poster_tilted(),
             list_hover: self.library.layer.as_ref().and_then(|layer| layer.list_hover),
         }
+    }
+
+    /// What the seam shows, to tell when its content changes layer or tab and turns over.
+    fn seam_key(&self) -> SeamKey {
+        (self.library.tab, self.library.layer.as_ref().map(|layer| layer.collection.id.clone()))
+    }
+
+    /// The seam content before a message that can change the layer or the tab, for it to turn away.
+    fn seam_before(&self, message: &Message) -> Option<(folia_store::HomeTab, Option<home::LayerSeam>, SeamKey)> {
+        let turns = matches!(
+            message,
+            Message::Library(
+                library::Message::Tab(_)
+                    | library::Message::Back
+                    | library::Message::ReloadCollection
+                    | library::Message::Wall(wall::Message::Press(Some(_), _))
+            ) | Message::Home(home::Message::SelectTab(_) | home::Message::Back | home::Message::ReloadCollection)
+        );
+        if !turns || self.page != Page::Library {
+            return None;
+        }
+        let rows = (self.window_size.height / home::LIST_ROW) as usize;
+        let layer =
+            self.library.layer_seam(&self.i18n, self.playback.current().map(|track| track.id), rows, self.window_size);
+        Some((self.library.tab, layer, self.seam_key()))
+    }
+
+    /// A change of page to or from the player is held until the page being left is captured, then cross-faded.
+    fn fade_page(&mut self, before: Page) -> Task<Message> {
+        let to = self.page;
+        let crosses = before != to && (before == Page::NowPlaying || to == Page::NowPlaying);
+        let Some(window) = self.window.filter(|_| crosses) else { return Task::none() };
+        self.page = before;
+        let capturing = self.next_page.replace(to).is_some();
+        if capturing {
+            return Task::none();
+        }
+        iced::window::screenshot(window).map(Message::PageShot).chain(Task::done(Message::PageShotDone))
     }
 
     /// The seam's account entry on online tabs (`useBravaisHomeAccount`).
