@@ -133,6 +133,7 @@ sourceLocal = "Lokal"
 sourceNetease = "NetEase"
 
 [libraryBravais]
+seamCollapseStrip = "Ciutkan strip info"
 homeTitle = "Pustaka"
 seamFold = "Lipat"
 seamExpand = "Bentangkan"

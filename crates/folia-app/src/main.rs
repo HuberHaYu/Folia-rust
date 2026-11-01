@@ -12,14 +12,20 @@ const DEFAULT_LOG: &str =
     if cfg!(debug_assertions) { "debug,wgpu=warn,naga=warn,iced=info,cosmic_text=warn" } else { "info" };
 const WINDOW_SIZE: iced::Size = iced::Size::new(1200.0, 800.0);
 
-fn window_settings() -> iced::window::Settings {
-    iced::window::Settings {
+fn window_settings() -> anyhow::Result<iced::window::Settings> {
+    let image =
+        image::load_from_memory_with_format(include_bytes!("../../../assets/icon.png"), image::ImageFormat::Png)?
+            .into_rgba8();
+    let (width, height) = image.dimensions();
+    let icon = iced::window::icon::from_rgba(image.into_raw(), width, height)?;
+    Ok(iced::window::Settings {
         size: WINDOW_SIZE,
         min_size: Some(iced::Size::new(350.0, 100.0)),
+        icon: Some(icon),
         decorations: false,
         platform_specific: platform_window(),
         ..Default::default()
-    }
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -64,7 +70,7 @@ fn main() -> anyhow::Result<()> {
         .title(Shell::title)
         .theme(Shell::theme)
         .subscription(Shell::subscription)
-        .window(window_settings())
+        .window(window_settings()?)
         .run()?;
     Ok(())
 }

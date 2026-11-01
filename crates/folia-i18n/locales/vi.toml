@@ -133,6 +133,7 @@ sourceLocal = "Nội bộ"
 sourceNetease = "NetEase"
 
 [libraryBravais]
+seamCollapseStrip = "Thu gọn thanh thông tin"
 homeTitle = "Thư viện"
 seamFold = "Gập"
 seamExpand = "Mở rộng"

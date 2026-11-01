@@ -353,6 +353,165 @@ fn vertical_title_size(title: &str, base: f32, min: f32) -> f32 {
     (320.0 / title.chars().count().max(1) as f32).round().clamp(min, base)
 }
 
+/// `BravaisSeamTitleArea` and `BravaisSeamSpineTitle` share the same selectable button in either axis.
+fn collection_title<'a>(
+    host: &Host<'a>,
+    seam: &super::LayerSeam,
+    ink: Color,
+    spine: bool,
+    horizontal: bool,
+) -> Element<'a, Message> {
+    let narrow = horizontal && host.window_width <= 600.0;
+    let quoted = !spine && !narrow;
+    let size = match (spine, horizontal) {
+        (true, false) => vertical_title_size(&seam.title, 30.0, 18.0),
+        (false, false) => vertical_title_size(&seam.title, 52.0, 26.0),
+        (true, true) => (640.0 / seam.title.chars().count().max(1) as f32).round().clamp(15.0, 20.0),
+        (false, true) if narrow => 26.0,
+        (false, true) => (640.0 / seam.title.chars().count().max(1) as f32).round().clamp(20.0, 40.0),
+    };
+    let glyphs = seam
+        .title
+        .chars()
+        .map(|ch| {
+            text(ch.to_string())
+                .size(size)
+                .font(extra_bold())
+                .color(ink)
+                .line_height(iced::widget::text::LineHeight::Relative(if horizontal { 1.15 } else { 1.25 }))
+                .into()
+        })
+        .collect::<Vec<Element<'a, Message>>>();
+    let title: Element<'a, Message> = if horizontal {
+        let max_width = if narrow {
+            host.window_width - 2.0 * 14.0
+        } else if spine {
+            host.window_width
+        } else {
+            let quotes: f32 = ["“", "”"]
+                .into_iter()
+                .map(|mark| folia_visualizer::measure(mark, 36.0, iced::Font::DEFAULT, f32::MAX).width)
+                .sum();
+            let inner = host.window_width - 2.0 * (host.window_width * 0.03).max(24.0);
+            inner * 0.48 - quotes - 2.0 * 8.0
+        };
+        container(row(glyphs).spacing(size * 0.01).wrap())
+            .max_width(max_width)
+            .max_height(size * 1.15 * if spine || narrow { 1.0 } else { 2.0 })
+            .clip(true)
+            .into()
+    } else {
+        column(glyphs).spacing(size * 0.04).align_x(Alignment::Center).into()
+    };
+    let face: Element<'a, Message> = if spine && horizontal {
+        container(title).padding([2.0, 6.0]).into()
+    } else if !quoted {
+        title
+    } else if horizontal {
+        let quote = |mark| text(mark).size(36).line_height(iced::widget::text::LineHeight::Relative(0.9));
+        row![
+            container(quote("“")).height(Length::Fill).align_y(Alignment::Start).padding(iced::Padding::ZERO.top(5.4)),
+            title,
+            container(quote("”")).height(Length::Fill).align_y(Alignment::End).padding(iced::Padding::ZERO.bottom(5.4))
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        let quote = |mark, side| {
+            container(text(mark).size(28).line_height(iced::widget::text::LineHeight::Relative(0.6)))
+                .width(Length::Fill)
+                .align_x(side)
+        };
+        let title = container(title).center_x(Length::Fill).center_y(Length::Fill).clip(true);
+        column![quote("”", Alignment::End), title, quote("“", Alignment::Start)].spacing(14).height(Length::Fill).into()
+    };
+    let title = super::title::Title::new(face, &seam.title, ink, host.accent, spine, horizontal).quotes(quoted);
+    let key = if spine { "libraryBravais.seamRestore" } else { "libraryBravais.seamCollapseStrip" };
+    iced::widget::Tooltip::new(
+        title,
+        text(super::tr(host, key).to_owned()).size(12),
+        iced::widget::tooltip::Position::Right,
+    )
+    .into()
+}
+
+/// `BravaisSeamFullRow`: crumbs keep their full row, followed by the horizontal title, metadata and actions.
+fn collection_full_row<'a>(host: &Host<'a>, seam: &super::LayerSeam, ink: Color) -> Element<'a, Message> {
+    let narrow = host.window_width <= 600.0;
+    let pad = if narrow { 14.0 } else { (host.window_width * 0.03).max(24.0) };
+    let head = row![
+        container(crumbs(host, seam, ink, false)).width(Length::Fill),
+        container(filter_field(host, seam, ink)).width(Length::Fixed(320.0_f32.min(host.window_width * 0.46)))
+    ]
+    .spacing(if narrow { 10 } else { 20 })
+    .align_y(Alignment::Center);
+    let mut info = column![text(seam.meta.clone()).size(12).color(soft(ink))].spacing(8);
+    if let Some(status) = &host.status {
+        info = info.push(text(status.clone()).size(12).color(ink));
+    }
+    let play = chrome_button(
+        Icon::Play,
+        super::tr(host, "libraryBravais.playAll"),
+        true,
+        ink,
+        seam.playable.then_some(Message::PlayAll),
+    );
+    let enqueue = chrome_button(
+        Icon::ListPlus,
+        super::tr(host, "libraryBravais.enqueueAll"),
+        false,
+        ink,
+        seam.playable.then_some(Message::EnqueueAll),
+    );
+    let mut actions = row![play, enqueue].spacing(6);
+    if let Some((saved, pending, label)) = &seam.star {
+        actions = actions.push(star(*saved, *pending, label.clone(), host.accent, ink));
+    }
+    let more = row![
+        chrome_button(
+            Icon::List,
+            super::tr(host, "libraryBravaisCollection.list"),
+            false,
+            ink,
+            Some(Message::OpenList)
+        ),
+        chrome_button(
+            Icon::Ellipsis,
+            super::tr(host, "libraryBravaisCollection.more"),
+            false,
+            ink,
+            Some(Message::CollectionMenu)
+        )
+    ]
+    .spacing(6);
+    let side = column![actions, more].spacing(8);
+    let title = collection_title(host, seam, ink, false, true);
+    let main: Element<'a, Message> = if narrow {
+        column![title, row![container(info).width(Length::Fill), side].spacing(12)]
+            .spacing(6)
+            .height(Length::Fill)
+            .into()
+    } else {
+        row![title, container(info).width(Length::Fill), side]
+            .spacing(32)
+            .align_y(Alignment::Center)
+            .height(Length::Fill)
+            .into()
+    };
+    column![head, main]
+        .spacing(if narrow { 6 } else { 10 })
+        .padding(iced::Padding {
+            top: if narrow { 8.0 } else { 12.0 },
+            right: pad,
+            bottom: if narrow { 10.0 } else { 16.0 },
+            left: pad,
+        })
+        .height(Length::Fixed(212.0))
+        .width(Length::Fill)
+        .into()
+}
+
 /// The full info strip of a collection layer (`FullSeam`): crumbs, the page filter, the vertical title, the count,
 /// play all, enqueue and the star, then the list and ⋯ more. The open list panel replaces it.
 fn collection_full<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
@@ -364,26 +523,7 @@ fn collection_full<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
         return album_poster(host, seam, album);
     }
     let crumbs = crumbs(host, seam, ink, false);
-    let quote = |mark: &'static str, side: Alignment| {
-        container(
-            text(mark)
-                .size(28)
-                .line_height(iced::widget::text::LineHeight::Relative(0.6))
-                .color(Color { a: ink.a * 0.35, ..ink }),
-        )
-        .width(Length::Fill)
-        .align_x(side)
-    };
-    let size = vertical_title_size(&seam.title, 52.0, 26.0);
-    let vertical = container(tracked_col_weight(&seam.title, size, 0.04, ink, iced::font::Weight::ExtraBold))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .clip(true);
-    let area = column![quote("\u{201c}", Alignment::End), vertical, quote("\u{201d}", Alignment::Start)]
-        .spacing(14)
-        .height(Length::Fill);
+    let area = collection_title(host, seam, ink, false, false);
     let mut body = column![
         crumbs,
         filter_field(host, seam, ink),
@@ -753,16 +893,12 @@ fn hairline<'a>(ink: Color, alpha: f32) -> Element<'a, Message> {
 /// The spine of a collection layer (`SpineSeam`): back, fold, the vertical title, the count, the filter mark, play, expand.
 fn collection_spine<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
     let Some(seam) = host.layer.as_ref() else { return space().into() };
-    let size = vertical_title_size(&seam.title, 30.0, 18.0);
-    let title = button(tracked_col_weight(&seam.title, size, 0.04, ink, iced::font::Weight::ExtraBold))
-        .padding(0)
-        .on_press(Message::Expand)
-        .style(button::text);
+    let title = collection_title(host, seam, ink, true, false);
     let count = container(tracked_col(&seam.meta, 11.0, 0.1, soft(ink))).clip(true);
     let mut items = column![
         ghost(Icon::ChevronLeft, 16.0, 36.0, ink, Some(Message::Back)),
         ghost(Icon::FoldHorizontal, 16.0, 36.0, ink, Some(Message::Fold)),
-        container(title).height(Length::Shrink).clip(true),
+        container(title).height(Length::Shrink),
         count,
     ]
     .spacing(12)
@@ -808,10 +944,15 @@ fn row_body<'a>(host: &Host<'a>, ink: Color) -> Element<'a, Message> {
     let fold = ghost(Icon::FoldHorizontal, 16.0, if spine { 34.0 } else { 36.0 }, ink, Some(Message::Fold));
     let mut items: Vec<Element<'a, Message>> = Vec::new();
     if let Some(seam) = host.layer.as_ref() {
+        if !spine {
+            return collection_full_row(host, seam, ink);
+        }
         items.push(ghost(Icon::ChevronLeft, 16.0, if spine { 34.0 } else { 36.0 }, ink, Some(Message::Back)));
         items.push(fold);
-        items.push(tracked_row(&seam.title, if spine { 15.0 } else { 22.0 }, 0.04, 0.0, ink));
-        items.push(text(seam.meta.clone()).size(12).color(soft(ink)).into());
+        items.push(collection_title(host, seam, ink, true, true));
+        if host.window_width > 600.0 {
+            items.push(text(seam.meta.clone()).size(12).color(soft(ink)).into());
+        }
         if let Some(status) = &host.status {
             items.push(text(status.clone()).size(12).color(ink).into());
         }

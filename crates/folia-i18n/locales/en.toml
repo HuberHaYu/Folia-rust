@@ -133,6 +133,7 @@ sourceLocal = "Local"
 sourceNetease = "NetEase"
 
 [libraryBravais]
+seamCollapseStrip = "Collapse the info strip"
 homeTitle = "Library"
 seamFold = "Fold"
 seamExpand = "Expand"

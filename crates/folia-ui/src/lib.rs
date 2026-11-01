@@ -36,6 +36,7 @@ mod wall_pan;
 mod wall_shift;
 
 pub use background::{error_chain, format_time};
+pub use home::title::seam_title_activates;
 pub use home::{default_level_is_spine, seam_safe_bottom};
 pub use overlay::{
     CAPSULE_COLLAPSE_MS, CAPSULE_EXPAND_MS, CAPSULE_FADE_MS, CAPSULE_SETTLE_MS, CHROME_HOLD_MS, CHROME_LEAVE_MS,
@@ -83,7 +84,7 @@ pub struct Init {
 }
 
 /// The home tab and the open collection, whose change turns the seam's content over.
-type SeamKey = (folia_store::HomeTab, Option<String>);
+type SeamKey = (folia_store::HomeTab, Option<String>, bool);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -250,21 +251,26 @@ impl Shell {
         let before = self.page;
         let settles_page = matches!(message, Message::PageShot(_) | Message::PageShotDone);
         let seam_before = self.seam_before(&message);
+        let focus_title = matches!(message, Message::Home(home::Message::TitleToggle { keyboard: true, .. }));
         let task = self.handle(message);
         let now = std::time::Instant::now();
         if let Some((tab, layer, key)) = seam_before
             && key != self.seam_key()
         {
-            self.seam_flip = Some(home::flip::SeamFlip::new(tab, layer, now));
+            self.seam_flip = Some(home::flip::SeamFlip::new(tab, layer, key.2, focus_title, now));
         }
+        let mut focus = Task::none();
         if self.seam_flip.as_ref().is_some_and(|flip| !flip.running(now)) {
+            if self.seam_flip.as_ref().is_some_and(|flip| flip.focus_title) {
+                focus = iced::widget::operation::focus(home::title::id());
+            }
             self.seam_flip = None;
         }
         if self.page_fade.as_ref().is_some_and(|fade| !fade.running(now)) {
             self.page_fade = None;
         }
         let fade = if settles_page { Task::none() } else { self.fade_page(before) };
-        let task = Task::batch([task, fade]);
+        let task = Task::batch([task, fade, focus]);
         if self.page != Page::NowPlaying {
             self.positioning = None;
         }
@@ -937,7 +943,7 @@ impl Shell {
             && (self.home.animating(now)
                 || self.library.coasting()
                 || self.library.hint_busy(now)
-                || self.seam_flip.as_ref().is_some_and(|flip| flip.running(now)))
+                || self.seam_flip.is_some())
         {
             parts.push(iced::window::frames().map(|_| Message::Library(library::Message::Frame)));
         }
@@ -1006,7 +1012,7 @@ impl Shell {
             window_width: self.window_size.width,
             window_height: self.window_size.height,
             seam: self.library.seam(),
-            spine: self.home.is_spine(),
+            spine: leaving.map_or(self.home.is_spine(), |flip| flip.spine),
             horizontal: self.home.is_horizontal(),
             opacity: content_opacity(self.library.seam().width, self.home.goal().max(1.0))
                 * self.seam_flip.as_ref().map_or(1.0, |flip| flip.opacity(now)),
@@ -1039,7 +1045,7 @@ impl Shell {
 
     /// What the seam shows, to tell when its content changes layer or tab and turns over.
     fn seam_key(&self) -> SeamKey {
-        (self.library.tab, self.library.layer.as_ref().map(|layer| layer.collection.id.clone()))
+        (self.library.tab, self.library.layer.as_ref().map(|layer| layer.collection.id.clone()), self.home.is_spine())
     }
 
     /// The seam content before a message that can change the layer or the tab, for it to turn away.
@@ -1051,7 +1057,13 @@ impl Shell {
                     | library::Message::Back
                     | library::Message::ReloadCollection
                     | library::Message::Wall(wall::Message::Press(Some(_), _))
-            ) | Message::Home(home::Message::SelectTab(_) | home::Message::Back | home::Message::ReloadCollection)
+            ) | Message::Home(
+                home::Message::SelectTab(_)
+                    | home::Message::Back
+                    | home::Message::ReloadCollection
+                    | home::Message::TitleToggle { .. }
+                    | home::Message::Expand
+            )
         );
         if !turns || self.page != Page::Library {
             return None;
@@ -1225,6 +1237,13 @@ impl Shell {
             self.library.replan(self.home.goal());
         }
         match message {
+            home::Message::TitleFocus { backwards } => {
+                if backwards {
+                    iced::widget::operation::focus_previous()
+                } else {
+                    iced::widget::operation::focus_next()
+                }
+            }
             home::Message::Search => {
                 self.page = Page::Search;
                 self.search.reveal();
@@ -1273,6 +1292,7 @@ impl Shell {
             home::Message::Dismiss
             | home::Message::Fold
             | home::Message::Expand
+            | home::Message::TitleToggle { .. }
             | home::Message::Tab
             | home::Message::More
             | home::Message::Tools
@@ -1418,6 +1438,9 @@ fn wall_key(event: iced::Event, status: iced::event::Status, _id: iced::window::
     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, repeat, .. }) = event else {
         return None;
     };
+    if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab) {
+        return Some(Message::Home(home::Message::TitleFocus { backwards: modifiers.shift() }));
+    }
     focus_card::key_of(&key, modifiers, repeat).map(|key| Message::Library(library::Message::Key(key)))
 }
 

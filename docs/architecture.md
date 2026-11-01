@@ -26,7 +26,7 @@
 2. `AppDirs::new(APP_DIR)` 取配置/数据/缓存目录：debug 为 `Folia-rust-dev`，release 为 `Folia-rust`（原 Electron 版占用 `%APPDATA%\Folia`，不得复用）。
 3. `Store::load_or_default` 读 `general.toml`、`appearance.toml`、`playback.toml`；读不了的记警告并用默认值。
 4. `LanguagePreference::resolve` 结合 `sys_locale::get_locale()` 得到语言，构造 `I18n`。
-5. 组装 `folia_ui::Init`（含 `library_db = <data>/library.db` 与命令行里的音频文件），`iced::application` 以 `Shell::new` 启动，窗口 1200×800。
+5. 组装 `folia_ui::Init`（含 `library_db = <data>/library.db` 与命令行里的音频文件），`iced::application` 以 `Shell::new` 启动，窗口 1200×800。`window_settings` 在事件循环开始前一次性解码内嵌的原版 `assets/icon.png` 为 RGBA8，设置 `window::Settings.icon`，解码错误向上传递。
 6. `Shell::new` 后台读取音乐库索引；有命令行文件时读标签、排队播放并切到正在播放页。窗口第一帧起盖首屏遮罩（`splash.rs`）。首页第一次收到资料库加载结果（成功或失败）并且之后画出一帧时开始 320ms 淡出；内容淡入仍从第一帧起算（延迟 180ms、时长 420ms），就绪早于 180ms 时内容不出现。逐帧订阅只到淡出结束。
 
 ## 线程
@@ -169,6 +169,7 @@
 - 在线墙：未登录时在线页签的墙是空的，画访客说明（`onlineWallHint`）：标题 `libraryBravaisHome.wallHint.guestTitle`，正文 `guestBodyWithLocal`（`connect` 是 `libraryBravaisHome.connect`，`local` 是本地页签名）；登录过期时是 `reloginTitle` / `reloginBody`，状态行 `status.loginExpired`。已登录：歌单页签铺用户创建与收藏的歌单（描述是创建者，没有就 `home.playlists`）；专辑页签铺收藏的专辑（描述是歌手，没有就 `player.unknownArtist`）；电台页签铺私人 FM、每日推荐、推荐歌单（`buildOnlineRadioCards`）。磁贴照 `projectHomeCardItem`：集合的曲目数并进左上角类型标签（「歌单 · 124」，`libraryBravais.kind.*`），私人 FM 只写「电台」。墙仍是 `wall.rs`：`Tile` 泛化为本地 / 在线封面（`CoverSource::Local` 读文件，`Remote` 经 `Omni::fetch_cover` 下载，再在线程里按磁贴尺寸裁切解码）、可选文字标签、探索标题磁贴；`Shape` 选择排法（`Ranked` 原有的按距离排槽，`Explore` 探索地块）。状态行照 `BravaisHomeDirectory`：有磁贴不说；读取中 `playlist.loading`；读完为空 `home.loadingLibrary`；账户解析中 `home.loadingLibrary`。
 - 点在线磁贴：歌单、专辑、每日推荐打开集合层；私人 FM 直接播放读到的 FM 歌曲并在快放完时补歌（`isPersonalFmCard`）；探索里的歌先展开成聚焦卡，卡上「立即播放」连同所在那一组的歌一起放；探索里的集合打开集合层。
 - 集合层：墙换成这张集合的曲目（编号角标），缝从 120 展开成 300 的完整信息条（`BRAVAIS_SEAM_FULL_WIDTH`；横的缝 212），照 `BravaisSeamContent` 的 `FullSeam`：‹ 返回（32px 圆，白 8% / 日间黑 5%）与面包屑「书库 › 名字」（11px，文字色 55%）、上下引号之间的竖排标题（字号 `verticalTitleSize(title, 52, 26)`，字重 800）、1px 12% 分隔线、元数据「歌单 · N 首」（`libraryBravais.trackCount_one/_other`）、状态行、「播放全部」（44px 高，15px 粗体，16% 底）。书脊（64px）照 `SpineSeam`：返回、折叠、竖排标题（`verticalTitleSize(title, 30, 18)`，点它展开）、竖排计数、播放、展开。点曲目磁贴从那一首起放这张集合。
+- 集合缝标题（`home/title.rs`、`home/seam.rs`）：完整信息条的引号和标题整块点击收成 64px 书脊，书脊标题点击展开到 300px；横条为 212/52px，并共用同一可选中文字按钮。`folia_ui::seam_title_activates(keyboard, down, at, has_selection)` 公开原版输入规则：键盘优先；指针按下至松开的欧氏距离 ≤4px 且没有非空标题选区时才激活，缺少按下记录时仍接受未选中文字的点击。选区按实际字形控件布局命中，拖出后松手不切换；Ctrl+A/C 支持选中/复制标题。悬停底色为文字色 6%，140ms CSS ease；完整标题圆角 14、引号透明度 0.35→0.6，书脊圆角 8、外扩 5px 浅底。键盘焦点为强调色 2px 外框、偏移 2px。Tab/Shift+Tab 在 iced 的可聚焦控件间导航，Enter/Space 激活，复用 `home/flip.rs` 的 160+240ms 翻转，结束后将键盘焦点交给新标题；鼠标切换不转移键盘焦点。`SeamFlip` 保存旧的书脊状态，离场 160ms 期间继续按旧形态排版。文案使用原版 `libraryBravais.seamCollapseStrip` / `seamRestore`，四份语言包同步，zh-TW 继续构建生成。与原版的差异：标题按字符控件排列而非 CSS writing-mode，选区高亮用 iced 主题色而非浏览器系统选区色；iced 0.14 的现有控件接口没有原生 aria/读屏按钮语义，悬停提示与键盘操作已接入，原生读屏支持不在本次补入。
 - 字重（`typeface.rs`）：界面所有字重都经 `typeface::weight` / `font` / `with` 一处映射：800、900 用 700，500 用 400。Windows 的 Segoe UI 没有 800，cosmic-text 不合成字重，找不到 800 时会退到别的字体（衬线）；Linux 上验证过，Windows 未验证。
 - 在线墙铺满整面（`wall.rs`）：照 `getInfiniteSlotItem` / `getWrapPeriod`，条目按块（12 个座位）铺，周期取整块，起点按 `FIELD_ASPECT 2.2` 旋转，所以条目少时也重复铺满，不留空。过滤时换成有限的排名墙（`Shape::Finite`）。没有封面的条目画 `fallbackBackground`：按卡片 key 的字码和取色相，145° 从 `hsl(h 68% 58%)` 到 `hsl(h+52 62% 18%)`；歌单与专辑卡右下有两层叠页边。
 - 集合层（续）：「播放全部」旁有「加入队列」（`enqueueAll`，追加到队尾，已在队列的不重复）、星标（收藏歌单 / 专辑，`options.subscribe*`，自己创建的歌单不显示）、「列表」与「⋯ 更多」（重新加载、折叠信息条）。面包屑下是「过滤当前页」（`BravaisSeamFilterField`：漏斗、下划线输入框、匹配数、清除），按标题、歌手、专辑过滤，墙换成有限墙，放歌以过滤后的歌为队列。「列表」打开 420 宽的列表面板（`BravaisListPanel`：面包屑「… › 列表」、44px 行、编号 / 标题 / 歌手 / 时长，正在播放的编号用强调色，单击定位到墙上的那一格，双击播放）。
@@ -225,6 +226,8 @@
 - 界面文字：`crates/folia-i18n/locales/{en,zh-CN,in,vi}.toml`，键名与原版 `folia-major/src/i18n/locales/*.ts` 相同；zh-TW 构建时生成；缺键回退 zh-CN。没有原版之外的新增键。插值用 `I18n::format`（`{{name}}`，与 i18next 相同）。
 
 ## 开发与发布
+
+Windows 的 debug / release exe 均由 `folia-app/build.rs` 通过 `winresource` 嵌入 `assets/icon.ico`（16/32/48/256 像素），只在目标系统为 Windows 时运行资源编译器，不在构建期转换图片。图标来源、转换方式与安装包差异见 [assets.md](assets.md)。窗口继续无边框，不添加自绘应用图标。
 
 | | debug（开发） | release（发布） |
 |---|---|---|

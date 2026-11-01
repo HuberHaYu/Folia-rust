@@ -19,11 +19,13 @@ pub struct SeamFlip {
     at: Instant,
     pub tab: HomeTab,
     pub layer: Option<LayerSeam>,
+    pub spine: bool,
+    pub focus_title: bool,
 }
 
 impl SeamFlip {
-    pub fn new(tab: HomeTab, layer: Option<LayerSeam>, now: Instant) -> Self {
-        Self { at: now, tab, layer }
+    pub fn new(tab: HomeTab, layer: Option<LayerSeam>, spine: bool, focus_title: bool, now: Instant) -> Self {
+        Self { at: now, tab, layer, spine, focus_title }
     }
 
     /// Whether the outgoing content is still turning away.

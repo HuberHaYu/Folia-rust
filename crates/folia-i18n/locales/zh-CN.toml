@@ -133,6 +133,7 @@ sourceLocal = "本地"
 sourceNetease = "网易云"
 
 [libraryBravais]
+seamCollapseStrip = "收起信息条"
 homeTitle = "书库"
 seamFold = "折叠"
 seamExpand = "展开"

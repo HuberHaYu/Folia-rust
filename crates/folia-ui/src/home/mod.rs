@@ -2,6 +2,7 @@
 
 pub mod flip;
 mod seam;
+pub mod title;
 mod tools;
 
 use std::time::Instant;
@@ -61,6 +62,13 @@ enum Level {
 pub enum Message {
     Fold,
     Expand,
+    TitleToggle {
+        spine: bool,
+        keyboard: bool,
+    },
+    TitleFocus {
+        backwards: bool,
+    },
     Tab,
     More,
     Tools,
@@ -174,6 +182,12 @@ impl HomeChrome {
         match message {
             Message::Fold => self.fold(now),
             Message::Expand => self.set_level(Level::Full, now),
+            Message::TitleToggle { spine, .. } => {
+                let level = if *spine { Level::Spine } else { Level::Full };
+                if level != self.level {
+                    self.set_level(level, now);
+                }
+            }
             Message::Tab => self.restore_or_reopen(now),
             Message::More => {
                 if self.level == Level::Spine {
@@ -223,6 +237,7 @@ impl HomeChrome {
             | Message::RowHover(_)
             | Message::PosterCover(_)
             | Message::FilterSubmit => {}
+            Message::TitleFocus { .. } => {}
         }
     }
 
