@@ -1,4 +1,4 @@
-// NetEase Cloud Music: anonymous search, song URLs and lyrics, plus QR sign-in and the account's library over eapi.
+// NetEase Cloud Music over eapi with the kept session: search, song URLs, lyrics, QR sign-in and the account's library.
 
 mod account;
 mod eapi;
@@ -9,7 +9,7 @@ use folia_core::{Lyrics, OnlineId, Track};
 use folia_lyrics::Format;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     Account, AudioSource, BoxFuture, Collection, CollectionKind, ExploreSection, LoginCode, LoginState, OmniError,
@@ -17,16 +17,15 @@ use crate::{
 };
 
 const ID: &str = "netease";
-const BASE: &str = "https://music.163.com";
+/// `getSongUrl`'s default level: VIP songs get a signed URL only at `exhigh` or above.
+const LEVEL: &str = "exhigh";
 
 pub struct Netease {
-    http: reqwest::Client,
     client: eapi::Client,
 }
 
 #[derive(Deserialize)]
 struct SearchResponse {
-    code: i64,
     result: Option<SearchResult>,
 }
 
@@ -65,7 +64,6 @@ struct Album {
 
 #[derive(Deserialize)]
 struct UrlResponse {
-    code: i64,
     #[serde(default)]
     data: Vec<UrlEntry>,
 }
@@ -81,7 +79,6 @@ struct UrlEntry {
 
 #[derive(Deserialize)]
 struct LyricResponse {
-    code: i64,
     #[serde(rename = "pureMusic", default)]
     pure_music: bool,
     lrc: Option<LyricText>,
@@ -97,12 +94,14 @@ struct LyricText {
 
 impl Netease {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { client: eapi::Client::new(http.clone()), http }
+        Self { client: eapi::Client::new(http) }
     }
 
-    /// Sends an anonymous request to the web API and decodes its JSON answer.
-    async fn call<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T, OmniError> {
-        Ok(request.header("Referer", BASE).send().await?.error_for_status()?.json().await?)
+    /// Posts to the client API with the session, so signed-in songs resolve, and decodes a code-200 answer.
+    async fn post<T: DeserializeOwned>(&self, path: &str, params: Value) -> Result<T, OmniError> {
+        let answer = self.client.post(path, account::object(params)).await?;
+        eapi::check(&answer.body)?;
+        serde_json::from_value(answer.body).map_err(|err| OmniError::Response(err.to_string()))
     }
 }
 
@@ -122,15 +121,8 @@ impl Provider for Netease {
         offset: u32,
     ) -> BoxFuture<'a, Result<Page<Track>, OmniError>> {
         Box::pin(async move {
-            let form = [
-                ("s", query.to_owned()),
-                ("type", "1".to_owned()),
-                ("limit", limit.to_string()),
-                ("offset", offset.to_string()),
-            ];
-            let response: SearchResponse =
-                self.call(self.http.post(format!("{BASE}/api/cloudsearch/pc")).form(&form)).await?;
-            check(response.code)?;
+            let params = json!({ "s": query, "type": 1, "limit": limit, "offset": offset, "total": true });
+            let response: SearchResponse = self.post("/api/cloudsearch/pc", params).await?;
             let result = response.result.unwrap_or(SearchResult { songs: Vec::new(), song_count: Some(0) });
             Ok(Page { items: result.songs.into_iter().map(track).collect(), total: result.song_count })
         })
@@ -138,9 +130,9 @@ impl Provider for Netease {
 
     fn audio_source<'a>(&'a self, song: &'a OnlineId) -> BoxFuture<'a, Result<AudioSource, OmniError>> {
         Box::pin(async move {
-            let url = format!("{BASE}/api/song/enhance/player/url?ids=[{}]&br=320000", song.id);
-            let response: UrlResponse = self.call(self.http.get(url)).await?;
-            check(response.code)?;
+            // `song_url_v1`, as `getSongUrl` asks for it.
+            let params = json!({ "ids": format!("[{}]", song.id), "level": LEVEL, "encodeType": "flac" });
+            let response: UrlResponse = self.post("/api/song/enhance/player/url/v1", params).await?;
             let entry = response.data.into_iter().next().ok_or(OmniError::Unavailable)?;
             let url = entry.url.filter(|url| !url.is_empty()).ok_or(OmniError::Unavailable)?;
             let extension = entry.kind.map(|kind| kind.to_ascii_lowercase()).unwrap_or_else(|| "mp3".to_owned());
@@ -150,9 +142,10 @@ impl Provider for Netease {
 
     fn lyrics<'a>(&'a self, song: &'a OnlineId) -> BoxFuture<'a, Result<Option<Lyrics>, OmniError>> {
         Box::pin(async move {
-            let url = format!("{BASE}/api/song/lyric/v1?id={}&lv=-1&tv=-1&rv=-1&yv=-1&ytv=-1&yrv=-1", song.id);
-            let response: LyricResponse = self.call(self.http.get(url)).await?;
-            check(response.code)?;
+            // `lyric_new`, as `getLyric` asks for it.
+            let params =
+                json!({ "id": song.id, "cp": false, "tv": 0, "lv": 0, "rv": 0, "kv": 0, "yv": 0, "ytv": 0, "yrv": 0 });
+            let response: LyricResponse = self.post("/api/song/lyric/v1", params).await?;
             Ok(lyrics(response))
         })
     }
@@ -281,8 +274,4 @@ fn collection(row: &Value, kind: CollectionKind) -> Option<Collection> {
 
 fn https(url: String) -> String {
     url.strip_prefix("http://").map(|rest| format!("https://{rest}")).unwrap_or(url)
-}
-
-fn check(code: i64) -> Result<(), OmniError> {
-    if code == 200 { Ok(()) } else { Err(OmniError::Platform(code)) }
 }
